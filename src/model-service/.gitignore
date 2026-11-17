@@ -1,0 +1,2 @@
+# Model files are made by `python cli.py --prepare` in src/deployment, not in git (weights are 14 MB, the original is in results/ in the bucket)
+/artifacts

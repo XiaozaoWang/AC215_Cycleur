@@ -12,9 +12,9 @@ ENV LANG=C.UTF-8
 # Tell Python to disable buffering so we don't lose any logs.
 ENV PYTHONUNBUFFERED=1
 
-# uv settings: install packages in copy mode; put the virtual env in /.venv (not in /app, so the -v .:/app mount during development doesn't cover it)
+# uv settings: install packages in copy mode. The virtual env goes in /.venv (not in /app, so the -v .:/app mount during development doesn't hide it)
 ENV UV_LINK_MODE=copy
-ENV UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV UV_PROJECT_ENVIRONMENT=/.venv
 
 # Ensure we have an up to date baseline, install dependencies and
 # create a user so we don't run the app as root
@@ -32,15 +32,15 @@ RUN set -ex; \
     mkdir -p /persistent && \
     chown app:app /persistent && \
     chown app:app /app && \
-    mkdir -p /opt/venv && \
-    chown app:app /opt/venv
+    mkdir -p /.venv && \
+    chown app:app /.venv
 
 
 # Switch to the new user
 USER app
 WORKDIR /app
 
-# Install Python packages at the exact versions locked in uv.lock
+# Install Python packages at the exact versions pinned in uv.lock
 ADD --chown=app:app pyproject.toml uv.lock /app/
 
 RUN uv sync --frozen

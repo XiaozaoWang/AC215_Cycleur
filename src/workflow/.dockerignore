@@ -1,0 +1,5 @@
+# Not copied into the image
+.venv/
+__pycache__/
+.env
+*.yaml

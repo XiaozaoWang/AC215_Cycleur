@@ -1,0 +1,5 @@
+# Local results and caches, not committed
+outputs/
+.venv/
+__pycache__/
+.env

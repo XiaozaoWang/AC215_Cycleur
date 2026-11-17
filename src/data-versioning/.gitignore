@@ -1,0 +1,2 @@
+# Real data stays out of git: git only keeps the small greenpath_dataset.dvc file, DVC pushes the data to dvc_store/ in the bucket
+/greenpath_dataset

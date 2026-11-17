@@ -1,104 +1,55 @@
 {
-  "schema_version": "greenpath-experience-en-v2",
+  "_note": "Online API contract: the 15 targets in model-service /health order. Scores range from 0 to 1. Historical training schemas are unchanged.",
+  "schema_version": "greenpath-dims-15-v2",
   "score_range": [
     0,
     1
   ],
-  "geometry_type": "Polygon",
   "dimensions": {
-    "traffic_intensity": {
-      "label": "Traffic intensity",
-      "description": "Higher means heavier perceived motor traffic.",
-      "keywords": [
-        "traffic",
-        "cars",
-        "car traffic"
-      ]
+    "tree_canopy": {
+      "description": "Trees around the route: street trees, yard and park trees, leaves overhead. The main source of shade."
     },
-    "quietness": {
-      "label": "Quietness",
-      "description": "Higher means a quieter perceived street environment.",
-      "keywords": [
-        "quiet",
-        "quietness",
-        "calm",
-        "peaceful"
-      ]
+    "forest_environment": {
+      "description": "Continuous woodland or forest along the route, not just scattered street trees."
     },
-    "shade": {
-      "label": "Shade",
-      "description": "Higher means more perceived shade at street level.",
-      "keywords": [
-        "shade",
-        "shady",
-        "tree shade"
-      ]
+    "grassland": {
+      "description": "Grass around the route: lawns, parks, sports fields, meadows, pasture."
     },
-    "naturalness": {
-      "label": "Naturalness",
-      "description": "Higher means a more natural-looking street environment; this does not specifically measure water or parks.",
-      "keywords": [
-        "natural",
-        "nature",
-        "naturalness"
-      ]
+    "open_landscape": {
+      "description": "How open the view is: broad sky and long views (fields, waterfronts, big parks). Low = closed in by buildings, dense trees or tunnels."
     },
-    "scenic_appeal": {
-      "label": "Scenic appeal",
-      "description": "Higher means more visually appealing scenery.",
-      "keywords": [
-        "scenic",
-        "beautiful",
-        "scenery"
-      ]
+    "road_width": {
+      "description": "How wide the nearby road is for cars (number of traffic lanes). Wider roads usually mean more and faster car traffic."
+    },
+    "water_access": {
+      "description": "Water right beside or near the route: sea, harbor, river, canal, lake, pond."
+    },
+    "urban_density": {
+      "description": "How many buildings there are and how tightly packed: dense city blocks versus open country."
+    },
+    "street_enclosure": {
+      "description": "Tall buildings closing in on both sides of the street, like a city canyon with little sky."
+    },
+    "farmland_pastoral": {
+      "description": "Countryside farmland: crop fields, pasture, orchards, vineyards, farmyards."
+    },
+    "industrial_area": {
+      "description": "Factories, warehouses, rail yards, ports, utility plants, derelict land."
     },
     "historic_character": {
-      "label": "Historic character",
-      "description": "Higher means a stronger perceived historic character.",
-      "keywords": [
-        "historic",
-        "history",
-        "old buildings"
-      ]
+      "description": "Old or heritage buildings: historic districts, old main streets, monuments."
     },
-    "liveliness": {
-      "label": "Liveliness",
-      "description": "Higher means more perceived street activity and liveliness.",
-      "keywords": [
-        "lively",
-        "liveliness",
-        "vibrant"
-      ]
+    "commercial_district": {
+      "description": "Shops, cafes, storefronts, shopping streets, malls."
     },
-    "visual_openness": {
-      "label": "Visual openness",
-      "description": "Higher means a more open visual field at street level.",
-      "keywords": [
-        "open views",
-        "openness",
-        "open view"
-      ]
+    "scenic_appeal": {
+      "description": "How attractive the place looks overall."
+    },
+    "architectural_character": {
+      "description": "Distinctive buildings that stand out: unusual shapes, bold colors, a strongly local style."
+    },
+    "visual_clutter": {
+      "description": "Overhead wires, poles, large road signs, billboards, traffic lights, overpasses."
     }
-  },
-  "examples": [
-    "A quiet ride with shade, avoid traffic",
-    "Historic streets with open views",
-    "Natural, beautiful scenery"
-  ],
-  "unsupported_concepts": {
-    "water": [
-      "river",
-      "water",
-      "waterfront",
-      "lake"
-    ],
-    "bike_lane": [
-      "bike lane",
-      "bike path"
-    ],
-    "cleanliness": [
-      "cleanliness",
-      "tidy"
-    ]
   }
 }

@@ -6,20 +6,23 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.143.0",
     "google-auth>=2.40.0",
+    "google-cloud-storage>=3.0.0",
+    "h3>=4.2.0",
+    "httpx>=0.28.1",
+    "pyarrow>=19.0.0",
+    "requests>=2.32.0",
     "google-genai>=2.30.0",
     "numpy>=2.5.4",
     "pydantic>=2.14.1",
-    "requests>=2.32.0",
+    "scipy>=1.14.0",
     "uvicorn>=0.54.0",
 ]
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
 
-# pytest: find the api package from the api-service root folder; tests live in tests/
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

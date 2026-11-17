@@ -1,0 +1,11 @@
+# Python packages this container needs: only for defining, compiling and submitting the pipeline, no data processing
+# Exact versions are locked into uv.lock by `uv lock`; if you change this, run `uv lock` again
+[project]
+name = "greenpath-workflow"
+version = "0.1.0"
+description = "GreenPath Vertex AI pipeline: data-collector -> data-labeler -> data-processor -> model-training"
+requires-python = ">=3.12"
+dependencies = [
+    "google-cloud-aiplatform>=1.120.0",   # submit pipelines to Vertex AI
+    "kfp>=2.14.6",                        # define steps and pipelines, compile to yaml
+]

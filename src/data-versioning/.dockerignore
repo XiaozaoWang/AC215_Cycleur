@@ -1,0 +1,7 @@
+# Data and DVC cache, not copied into the image (can be several GB)
+greenpath_dataset/
+.dvc/
+README.md
+.venv/
+__pycache__/
+.env

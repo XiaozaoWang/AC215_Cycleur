@@ -1,0 +1,33 @@
+# Python packages the Model Service needs; exact versions are locked into uv.lock by `uv lock`, building the image installs exactly what uv.lock says
+# Run `uv lock` again after changing this
+[project]
+name = "greenpath-model-service"
+version = "0.1.0"
+description = "GreenPath model service: H3 cells (or one aerial tile) in, 15 scenery scores out"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115,<1",           # web API
+    "uvicorn>=0.30,<1",            # server that runs FastAPI
+    "python-multipart>=0.0.9",     # /predict_image receives the uploaded image
+    "torch>=2.14,<2.15",           # same major version as training (config.json records torch 2.14.1), CPU build, see below
+    "torchvision>=0.29,<0.30",     # needed by timm
+    "timm==1.0.31",                # exactly the same as training, so DINOv2 and preprocessing match
+    "pillow>=11",                  # read images
+    "gcsfs>=2025.1,<2027",         # read the bucket: cell index and aerial tiles
+    "pandas>=2.2,<3",
+    "pyarrow>=19,<24",             # read Parquet
+]
+
+[tool.uv]
+# Only installed inside Docker (Linux), not directly on the Mac
+environments = ["sys_platform == 'linux'"]
+
+# Use the CPU build of torch: Cloud Run has no GPU, the CPU build is several GB smaller than the default CUDA build, so smaller image and faster startup
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

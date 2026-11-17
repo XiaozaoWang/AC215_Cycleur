@@ -6,11 +6,15 @@ set -e
 # Set vairables
 export BASE_DIR=$(pwd)
 export SECRETS_DIR=$(pwd)/../../../secrets/
-export GCP_PROJECT="ac215-507902" # CHANGE TO YOUR PROJECT ID
-export GOOGLE_APPLICATION_CREDENTIALS="/secrets/llm-service-account.json"
+# Team defaults; these variables can also be supplied by the caller.
+export GCP_PROJECT="${GCP_PROJECT:-organic-victory-508017-v9}"
+export GREENPATH_BUCKET="${GREENPATH_BUCKET:-ac215-notebook}"
+export GREENPATH_DATASET="${GREENPATH_DATASET:-1026_Full_data}"
+export MODEL_SERVICE_URL="${MODEL_SERVICE_URL:-http://host.docker.internal:8080}"
+export GOOGLE_APPLICATION_CREDENTIALS="${GOOGLE_APPLICATION_CREDENTIALS_CONTAINER:-/secrets/llm-service-account.json}"
 export IMAGE_NAME="smartpath-api-service"
 
-# Create the docker network (skip if it already exists), the same network docker-compose.yml uses
+# Create the docker network (skip if it already exists), same network as docker-compose.yml
 docker network inspect smartpath-network >/dev/null 2>&1 || docker network create smartpath-network
 
 
@@ -25,5 +29,9 @@ docker run --rm --name $IMAGE_NAME -ti \
 -v "$SECRETS_DIR":/secrets \
 -e GOOGLE_APPLICATION_CREDENTIALS=$GOOGLE_APPLICATION_CREDENTIALS \
 -e GCP_PROJECT=$GCP_PROJECT \
+-e GREENPATH_BUCKET=$GREENPATH_BUCKET \
+-e GREENPATH_DATASET=$GREENPATH_DATASET \
+-e MODEL_SERVICE_URL=$MODEL_SERVICE_URL \
+-e MODEL_MAX_CONCURRENCY -e GEMINI_MODEL -e GEMINI_LOCATION \
 --network smartpath-network \
 $IMAGE_NAME

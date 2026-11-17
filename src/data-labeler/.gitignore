@@ -1,0 +1,5 @@
+# local cache and QC figures: don't commit
+qc/
+.venv/
+__pycache__/
+.env

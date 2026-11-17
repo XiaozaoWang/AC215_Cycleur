@@ -1,41 +1,29 @@
-# Data ingestion and preparation
+# GreenPath data processor
 
-This is the first of four ML jobs. It ingests a versioned GCS snapshot of existing
-notebook 01-04 outputs, safely extracts NAIP images, then executes notebook 05's
-join/filter/spatial-split/buffer/fold logic. It does not reacquire Mapillary imagery,
-query OSM or invoke a paid teacher. Those upstream operations run in the separate `data-source` container; this component
-starts from their frozen outputs.
+Turns the data-labeler scores into the training table. All logic is in `cli.py`; it does not call Gemini, download images, train, or change the source labels.
+
+## Run
 
 ```sh
-uv sync --frozen --python 3.11
-uv run --frozen greenpath-data --help
-uv run --frozen pytest -q
+sh docker-shell.sh                      # shell in the container, then run python cli.py ...
+sh docker-shell.sh cli.py --prepare     # full prep, writes gs://<bucket>/training/<dataset-id>_<time>/
+sh docker-build-push.sh                 # push the image to Artifact Registry for the Vertex pipeline
 ```
 
-`snapshot` freezes current processed tables and valid aerial images into a new version.
-`prepare` validates a local snapshot and builds the dataset. `ingest` downloads/verifies
-source and encoder artifacts with read-only ADC, then prepares the dataset. `--offline`
-requires pre-existing verified caches and never contacts GCS.
+The Vertex pipeline (`src/workflow/cli.py`) runs `cli.py --prepare --bucket <bucket> --dataset-id <dataset> --training-id <id> --output-dir gs://<bucket>/training/<id>`. If the output folder already exists it fails, so old training sets are never overwritten.
 
-Smoke mode selects 32 train, 8 validation and 8 test cells *after* full spatial splitting
-and buffering. It is a 48-image execution check, not the historical 188-cell evaluation.
-Full mode keeps all qualifying cells. Both modes record hashes, split counts, filtering
-parameters, image provenance and teacher-label limitations. Original v1 is never overwritten.
+## What `--prepare` does
 
-All images are checked as RGB 256x256 tiles. CLIP crop/normalization is executed by the
-next component. Unsafe archives, broken hashes and ambiguous IDs fail before publication.
-Build the image from the repository root following [ML_PIPELINE.md](../../docs/ML_PIPELINE.md),
-so the shared sibling model package is included.
+1. Reads `datasets/<dataset-id>/` (cells, OSM features, street view, aerial and street labels), checks it is complete and consistent, drops cells with `tile_ok` false.
+2. Splits before removing anything: 4 places (plus areas within 3 km) are Test, the rest goes to Train/Val by H3 level 8 blocks (about 15% Val, 5 folds, seed 42).
+3. Removes whole cells hit by the three detection rules (round 1) or by the manual flags CSV `datasets/<dataset-id>/corrections/v2/manual_flags.csv` (round 2; skipped if missing, `--manual-flags-csv none` turns it off).
+4. Maps street scores to the aerial scale by quantiles fit on Train + Val only, then fuses them with fixed weights into 15 targets in 0-1 (`visual_clutter` is street only, `hilly_terrain` is not used).
+5. Writes `dataset.parquet` (87 columns), `exclusions.parquet` and `meta.json`.
 
-## New source snapshots and archives
+Without `--prepare` it only runs the three rules (street photos taken indoors or in tunnels, broken or misread aerial tiles, low suburban farmland/grassland scores among high neighbors) and writes `gs://<bucket>/candidates/<time>/candidates.parquet`. Nothing is removed.
 
-A new source workspace can be frozen after its selected-image labeling is complete.
-The snapshot preserves aggregate/image labels, source configuration and run records.
-`archive` separately backs up raw images, OSM PBF and paid label journals; `--snapshot-dir`
-binds that archive to the frozen source files under an exclusive source lock.
+## Tests
 
-The training launcher now accepts `--source-dir` to prepare a local immutable snapshot
-without requiring an intermediate GCS upload. Encoder weights still use their verified
-cache/GCS source. Dataset identity derives from the source manifest, contract, preparation
-recipe and mode rather than a universal `pipeline-full-v1` label. See
-[DATA_AND_MODEL_VERSIONING.md](../../docs/DATA_AND_MODEL_VERSIONING.md) for the version chain.
+```sh
+uv run --locked python -m unittest discover -s tests
+```

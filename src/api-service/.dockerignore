@@ -1,18 +1,18 @@
-# Things not packed into the image at build time (works like .gitignore, but for Docker).
-# Background: ADD . /app in the Dockerfile puts the whole api-service folder into the image;
-#       the items below are caches or system files made automatically when running locally; the image doesn't need them, so leaving them out keeps the image cleaner and the build faster.
-# Note: during development docker-compose mounts the code into the container; mounts aren't affected by this file, it only affects the built image.
+# Things left out of the image at build time (works like .gitignore, but for Docker).
+# Background: ADD . /app in the Dockerfile puts the whole api-service folder into the image.
+#             The files below are caches or system files made automatically when running locally. The image doesn't need them, so leaving them out keeps the image cleaner and the build faster.
+# During development docker-compose mounts the code into the container. The mount is not affected by this file, only the built image is.
 
-# Caches Python makes automatically when running
+# Caches Python makes automatically at runtime
 __pycache__/
 **/__pycache__/
 *.pyc
 
-# Caches left over after running pytest and ruff
+# Caches left behind by pytest and ruff
 .pytest_cache/
 .ruff_cache/
 
-# The local virtual env (the image has its own /.venv; the one on the Mac can't be used)
+# Local virtual env (the image has its own /.venv, the one from the Mac can't be used)
 .venv/
 
 # Files the Mac makes automatically
@@ -22,3 +22,6 @@ __pycache__/
 # Safety net: if someone ever puts a key in this folder, it still won't be packed into the image
 secrets/
 *service-account*.json
+
+# Keep local environment files out of ADD . /app.
+.env*

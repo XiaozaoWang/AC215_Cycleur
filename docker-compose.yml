@@ -1,49 +1,98 @@
-# Application reads the configured bundle and optional version catalog; training is separate.
+#  Page:      http://localhost:3000
+#  API docs:  http://localhost:9000/docs
+#  My key is in ../secrets/llm-service-account.json outside the repo
+
+# network to put these two containers in
 networks:
-  default: {}
+  default:
+    name: smartpath-network
+
 services:
   api-service:
     build: ./src/api-service
-    image: greenpath-api-service
+    image: smartpath-api-service
+    container_name: smartpath-api-service
     ports:
-      - "127.0.0.1:${API_PORT:-9000}:9000"
+      - "127.0.0.1:9000:9000" # only open to this machine
     volumes:
-      - ./src/api-service:/app
-      - ./.artifacts:/artifacts:ro
+      - ./src/api-service:/app # mount the code for convenience, after changes just docker compose restart api-service, no need to rebuild
+      - ../secrets:/secrets:ro # key
     environment:
-      GCP_PROJECT: ${GCP_PROJECT:-organic-victory-508017-v9} #如果.env没设置则用这里的值
-      LLM_PROVIDER: ${LLM_PROVIDER:-mock}
-      MODEL_PROVIDER: ${MODEL_PROVIDER:-bundle}
-      MODEL_ARTIFACTS_ROOT: /artifacts
-      MODEL_CATALOG_PATH: /artifacts/catalog/serving.json
-      MODEL_BUNDLE_DIR: ${MODEL_BUNDLE_DIR:-/app/fixtures/boston-heldout-en-v2}
+      GCP_PROJECT: ${GCP_PROJECT:-organic-victory-508017-v9} #my project name, everyone can change it to their own
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS_CONTAINER:-/secrets/llm-service-account.json}
+      # which LLM: gemini needs a key, mock is the local keyword stand-in, no key and no cost
+      # usage: LLM_PROVIDER=mock docker compose up, or put it in .env (see .env.example)
+      # Real data and private Model Service connection for Phase 3.
+      GREENPATH_BUCKET: ${GREENPATH_BUCKET:-ac215-notebook}
+      GREENPATH_DATASET: ${GREENPATH_DATASET:-1026_Full_data}
+      MODEL_SERVICE_URL: ${MODEL_SERVICE_URL:-http://host.docker.internal:8080}
+      MODEL_MAX_CONCURRENCY: ${MODEL_MAX_CONCURRENCY:-10}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
+      GEMINI_LOCATION: ${GEMINI_LOCATION:-global}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      RAG_SERVICE_URL: http://rag-api:8001
+      RAG_GATEWAY_TIMEOUT_SECONDS: ${RAG_GATEWAY_TIMEOUT_SECONDS:-50}
+
+    # Every 10 seconds Docker opens http://localhost:9000/ inside the container (get_index in service.py),
+    # if it opens it counts as healthy, 5 failures in a row means unhealthy. docker compose ps shows the status directly.
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9000/', timeout=3)"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      interval: 10s # check every 10 seconds
+      timeout: 5s # wait at most 5 seconds per check
+      retries: 5 # only unhealthy after 5 failures in a row
+      start_period: 15s # failures in the first 15 seconds don't count, gives uvicorn time to start
+
+  # frontend: Next.js dev server (JS in the browser calls localhost:9000 directly)
   frontend:
     build:
-      context: ./src/frontend-app
+      context: ./src/frontend
       dockerfile: Dockerfile.dev
-    image: greenpath-frontend
-    entrypoint: ["/bin/bash", "-c", "npm ci && npm run dev"]
-    ports:
-      - "127.0.0.1:${FRONTEND_PORT:-3000}:3000"
-    volumes:
-      - ./src/frontend-app:/app
-      - frontend_node_modules:/app/node_modules
+    image: smartpath-frontend
+    container_name: smartpath-frontend
     environment:
-      NEXT_PUBLIC_BASE_API_URL: http://localhost:${API_PORT:-9000}
+      API_SERVICE_URL: http://api-service:9000
+    entrypoint: ["/bin/bash", "-c", "npm install && npm run dev"]
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./src/frontend:/app # mount the code in, so the page reloads by itself after changes
+    # start the frontend only after the backend is "healthy", the old version only waited for the backend container to "start", not until it could take requests
     depends_on:
       api-service:
         condition: service_healthy
+
+  # Optional knowledge service: scoring and frontend have no startup dependency on it.
+  rag-api:
+    build: ./src/rag-service
+    image: smartpath-rag-api
+    volumes:
+      - ../secrets:/secrets:ro
+    environment:
+      GOOGLE_APPLICATION_CREDENTIALS: /secrets/llm-service-account.json
+      GCP_PROJECT: ${RAG_GCP_PROJECT:-extended-web-508017-j2}
+      GCP_LOCATION: ${RAG_GCP_LOCATION:-global}
+      GENERATIVE_MODEL: ${RAG_GENERATIVE_MODEL:-gemini-3.1-flash-lite}
+      RAG_GENERATOR: ${RAG_GENERATOR:-base}
+      RAG_CHUNK_TYPE: ${RAG_CHUNK_TYPE:-markdown-split}
+      RAG_CLOUD_TIMEOUT_MS: ${RAG_CLOUD_TIMEOUT_MS:-20000}
+      CHROMADB_HOST: ${CHROMADB_HOST:-chromadb}
+      CHROMADB_PORT: ${CHROMADB_PORT:-8000}
+      CHROMADB_SSL: ${CHROMADB_SSL:-false}
+      ANONYMIZED_TELEMETRY: "false"
+    depends_on:
+      chromadb:
+        condition: service_started
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 5s
+      test: ["CMD", "/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/ready', timeout=4)"]
+      interval: 20s
       timeout: 5s
-      retries: 24
-      start_period: 30s
-volumes:
-  frontend_node_modules:
+      retries: 3
+      start_period: 60s
+
+  chromadb:
+    image: chromadb/chroma:1.5.9
+    environment:
+      ANONYMIZED_TELEMETRY: "false"
+    volumes:
+      # Chroma 1.5.9 persists SQLite and vector indexes under /data.
+      - ./src/rag-service/docker-volumes/chromadb:/data

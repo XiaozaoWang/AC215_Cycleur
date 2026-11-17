@@ -1,0 +1,24 @@
+# Python packages this container needs (like a shopping list)
+# Exact versions are locked into uv.lock by `uv lock`; the image build installs exactly what uv.lock says, so you, teammates and Vertex all get the same env
+# After changing this, run `uv lock` again
+[project]
+name = "greenpath-data-labeler"
+version = "0.1.0"
+description = "GreenPath data labeler: score aerial tiles and street photos with Gemini on Vertex AI"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai>=2.33.0",                # calls Gemini (Vertex AI) with the current identity, no API key needed
+    "google-auth>=2.62.0",                 # finds the current identity automatically (locally your account, in the cloud the service account)
+    "pydantic>=2.14.1",                    # defines the format of Gemini's answer
+    "fsspec>=2026.9.0",
+    "gcsfs>=2026.10.1",                    # read/write the bucket
+    "python-dotenv>=1.2.4",
+    "numpy>=2.4.6",
+    "pandas>=3.1.0",
+    "pyarrow>=26.0.0",
+    "h3>=4.5.0",
+    "pillow>=13.0.0",
+    "matplotlib>=3.11.2",
+    "folium>=0.20.0",
+    "tqdm>=4.70.1",
+]

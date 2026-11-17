@@ -1,0 +1,7 @@
+# Local results, tests and caches, not copied into the image
+outputs/
+tests/
+README.md
+.venv/
+__pycache__/
+.env

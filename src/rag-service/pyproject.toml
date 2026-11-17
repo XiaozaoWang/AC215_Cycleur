@@ -1,0 +1,19 @@
+# Python packages this container needs; exact versions are locked into uv.lock by `uv lock`, building the image installs exactly what uv.lock says
+# Run `uv lock` again after changing this
+[project]
+name = "greenpath-vector-db"
+version = "0.1.0"
+description = "GreenPath RAG sample: chunk Markdown sources, embed with Gemini, load into ChromaDB"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "chromadb>=1.1.0",                 # client for the ChromaDB container, version must match the server in docker-compose
+    "google-genai>=1.39.1",            # calls Gemini embedding (Vertex AI)
+    "langchain-text-splitters>=0.3.0", # chunking tools
+    "pandas>=2.3.3",
+    "pyyaml>=6.0",                     # reads the info header at the top of each MD
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "httpx>=0.28.0"]

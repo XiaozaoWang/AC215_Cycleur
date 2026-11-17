@@ -1,26 +1,37 @@
-# The order window ("front desk"): only takes the parameters → hands them to pipeline / agent → returns; no flow or math logic here.
+"""HTTP endpoints translate input and service failures; pipeline.py owns scoring."""
 from fastapi import APIRouter, HTTPException
 
-from api import agent, pipeline
+from api import agent, model_client, pipeline, tiles
 from api.schemas import AgentResult, PreferenceRequest, ScoreRequest, ScoreResponse
-from api.versions import UnknownVersionError
 
 router = APIRouter()
 
 
-# Only runs the harness: user's words → weights + record of every Q&A (for debugging and display)
-# Use def, not async def: the Gemini call blocks while waiting for the result; FastAPI puts def into a thread pool, so it doesn't block other requests
 @router.post("/preference", response_model=AgentResult)
 def post_preference(request: PreferenceRequest) -> AgentResult:
     return agent.get_preference(request.text)
 
 
-# Full flow ①–⑩: hand the whole flow to pipeline.run_score(); turn an unknown region into HTTP 404
+@router.get("/regions/{region_id}")
+def get_region(region_id: str) -> dict:
+    try:
+        return {"region_id": region_id, "h3_index": [t.h3_index for t in tiles.get_tiles(region_id)]}
+    except tiles.UnknownRegionError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except tiles.RegionLoadError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
 @router.post("/score", response_model=ScoreResponse)
 def post_score(request: ScoreRequest) -> ScoreResponse:
+    # These synchronous handlers run in FastAPI's thread pool during cloud I/O.
     try:
-        return pipeline.run_score(request.text, request.region_id, version_id=request.version_id)
-    except (pipeline.UnknownRegionError, UnknownVersionError) as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except (ValueError, FileNotFoundError) as e:
-        raise HTTPException(status_code=503, detail=f"Model artifact unavailable or invalid: {e}")
+        return pipeline.run_score(request.text, request.region_id)
+    except tiles.UnknownRegionError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except tiles.RegionLoadError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except model_client.ModelTimeoutError as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except model_client.ModelServiceError as exc:
+        raise HTTPException(502, str(exc)) from exc
