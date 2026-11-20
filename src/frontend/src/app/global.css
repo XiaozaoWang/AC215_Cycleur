@@ -315,3 +315,31 @@ html, body {
     .explain { max-height: none; }
 }
 .route-card .alt { font-style: normal; color: #8e8e93; }
+
+/* On a real phone: no drawn iPhone around the app. The app fills the screen, controls keep clear of the notch and the
+   home indicator (safe-area insets), and the explanation panel (a desktop aid) is hidden. */
+@media (max-width: 600px) {
+    html, body { overflow: hidden; overscroll-behavior: none; }
+    .stage { display: block; height: 100dvh; min-height: 0; padding: 0; }
+    .phone { position: fixed; inset: 0; height: auto; aspect-ratio: auto; border-radius: 0; background: #8a8a8a; box-shadow: none; }
+    .screen { inset: 0; border-radius: 0; }
+    .island, .home-bar { display: none; }
+    .explain { display: none; }
+
+    .prompt { top: calc(env(safe-area-inset-top, 0px) + 10px); left: 12px; right: 12px; height: 52px; padding: 0 6px 0 18px; }
+    .prompt input { font-size: 16px; }              /* 16px or more: iPhone does not zoom in when the field gets focus */
+    .prompt button { width: 40px; height: 40px; font-size: 20px; }
+    .map-hint { top: calc(env(safe-area-inset-top, 0px) + 72px); }
+    .map-sub { top: calc(env(safe-area-inset-top, 0px) + 106px); }
+    .basemap-toggle { top: calc(env(safe-area-inset-top, 0px) + 140px); right: 12px; }
+    .basemap-toggle button { padding: 10px 14px; font-size: 13px; }
+
+    .assistant-entry { bottom: calc(env(safe-area-inset-bottom, 0px) + 16px); right: 12px; }
+    .route-cards { left: 12px; right: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 72px); }
+    .legend { left: 12px; bottom: calc(env(safe-area-inset-bottom, 0px) + 76px); }
+    .legend.above-cards { bottom: calc(env(safe-area-inset-bottom, 0px) + 210px); }
+    .map .leaflet-control-attribution { font-size: 9px; margin-bottom: env(safe-area-inset-bottom, 0px); }
+
+    .ride-chat { inset: calc(env(safe-area-inset-top, 0px) + 12px) 0 0; }
+    .ride-composer { padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 14px); }
+}
