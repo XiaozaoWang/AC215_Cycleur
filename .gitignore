@@ -18,3 +18,7 @@ src/rag-service/**/*.bin
 
 # Keep RAG tests local.
 src/rag-service/tests/
+
+# Local only: the Kubernetes tutorial copy (own git repo, kubeconfig) and Claude Code skills
+k8s reference/
+.claude/

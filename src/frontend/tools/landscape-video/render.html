@@ -1,0 +1,374 @@
+<!doctype html>
+<!-- Renders the home screen's landscape as a seamless loop and streams the frames to server.py, which encodes
+     public/home-landscape.mp4 and public/home-landscape.jpg. See server.py for how to run it.
+     Open with ?preview to watch the loop play in real time instead. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Landscape video</title>
+<style>
+  body { margin: 0; background: #f3f3f3; font: 13px -apple-system, sans-serif; }
+  canvas { display: block; width: 100%; height: auto; }
+  #status { position: fixed; left: 12px; bottom: 12px; padding: 4px 8px; background: #fff; border-radius: 6px; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">ready</div>
+<script>
+const W = 1280, H = 720, FPS = 30, SECONDS = 81;           // 2430 frames; the camera moves PERIOD / SECONDS units a second
+const FRAMES = FPS * SECONDS;
+const HAZE = 0.08;                                          // the white veil the page used to lay over the canvas
+
+const vert = 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }';
+const scene = `
+precision highp float;
+uniform vec2 uRes;
+uniform float uPhase;                       // 0..1 through the loop
+uniform float uLook;                        // lighting: 0 = soft front light, 1 = side light, 2 = stronger side light
+
+// Everything repeats along z every PERIOD world units, so the flight loops seamlessly
+const float PERIOD = 105.4;
+const float TAU = 6.2831853;
+const float W = TAU / PERIOD;
+
+float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+float hash3(vec3 p) { p = fract(p * vec3(123.34, 456.21, 789.92)); p += dot(p, p.yzx + 45.32); return fract((p.x + p.y) * p.z); }
+float noise3(vec3 p) {
+  vec3 i = floor(p), f = fract(p);
+  vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);                // smooth enough that slopes show no creases
+  float a = mix(mix(hash3(i), hash3(i + vec3(1.0, 0.0, 0.0)), u.x), mix(hash3(i + vec3(0.0, 1.0, 0.0)), hash3(i + vec3(1.0, 1.0, 0.0)), u.x), u.y);
+  float b = mix(mix(hash3(i + vec3(0.0, 0.0, 1.0)), hash3(i + vec3(1.0, 0.0, 1.0)), u.x), mix(hash3(i + vec3(0.0, 1.0, 1.0)), hash3(i + vec3(1.0, 1.0, 1.0)), u.x), u.y);
+  return mix(a, b, u.z);
+}
+// Noise that repeats along z: z goes round a circle in the noise's y-z plane, as long as fz * PERIOD noise cells
+float pnoise(float xs, float z, float fz, vec3 off) {
+  float r = fz / W;
+  return noise3(vec3(xs, r * cos(z * W), r * sin(z * W)) + off);
+}
+// Two octaves only: big, smooth forms with no fine texture (scaled to the range three octaves had)
+float fbm3(vec2 p, float f, vec3 off) {
+  return 0.5 * pnoise(p.x * f, p.y, f, off) + 0.25 * pnoise(p.x * f * 2.0, p.y, f * 2.0, off + vec3(3.1, 7.7, 1.9)) + 0.0625;
+}
+
+// The river winds in S-bends like the reference: a broad swing, a long bend, and two tighter ones near at hand. The
+// camera follows only the broad swing and half of the long bend, so the river curls left and right across the view.
+float broadX(float z) { return 4.6 * sin(z * W); }
+float pathX(float z) { return broadX(z) + 1.2 * sin(z * 2.0 * W + 0.6); }
+float riverX(float z) {
+  return broadX(z) + 2.4 * sin(z * 2.0 * W + 0.6) + 2.0 * sin(z * 5.0 * W + 1.3) + 0.9 * sin(z * 7.0 * W + 2.9);
+}
+float riverSlope(float z) {
+  return W * (4.6 * cos(z * W) + 4.8 * cos(z * 2.0 * W + 0.6) + 10.0 * cos(z * 5.0 * W + 1.3) + 6.3 * cos(z * 7.0 * W + 2.9));
+}
+// Distance from the river's middle, measured square to its course (so it keeps its width through the bends)
+float riverDist(vec2 p) {
+  float s = riverSlope(p.y);
+  return abs(p.x - riverX(p.y)) / sqrt(1.0 + s * s);
+}
+
+// The ground without buildings
+float ground(vec2 p) {
+  float d = riverDist(p);
+  float valley = smoothstep(1.6, 7.5, d);
+  float mountains = pow(smoothstep(4.2, 17.0, d), 1.3) * (2.2 + 5.5 * fbm3(p, 0.045, vec3(0.0)));    // broad, rounded forms
+  float ranges = smoothstep(15.0, 42.0, d) * (2.0 + 3.5 * fbm3(p, 0.028, vec3(11.0)));             // farther ranges rise behind
+  float hills = (pnoise(p.x * 0.09, p.y, 0.09, vec3(4.0)) - 0.5) * 0.45 * valley;       // gentle swells, no bumps
+  float h = valley * 0.5 + mountains + ranges + hills;
+  return mix(-0.06, h, smoothstep(0.9, 1.7, d));                      // a wide river bed
+}
+
+float height(vec2 p) { return ground(p); }
+
+vec3 normalAt(vec2 p, float t) {
+  float e = 0.35 + t * 0.008;                                          // a wide sample: smooth, unbroken slopes
+  return normalize(vec3(height(p - vec2(e, 0.0)) - height(p + vec2(e, 0.0)), 2.0 * e, height(p - vec2(0.0, e)) - height(p + vec2(0.0, e))));
+}
+
+float sky(vec3 rd) {
+  float g = clamp(rd.y * 3.0, 0.0, 1.0);
+  return mix(0.985, 0.955, g) + exp(-abs(rd.y) * 8.0) * 0.02;       // bright, especially toward the horizon
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+  float z = uPhase * PERIOD;
+  vec3 ro = vec3(pathX(z - 3.0), 2.7 + 0.1 * sin(uPhase * TAU * 3.0), z);
+  vec3 ta = vec3(pathX(z + 16.0), 0.4, z + 18.0);
+  vec3 fw = normalize(ta - ro);
+  vec3 rt = normalize(cross(vec3(0.0, 1.0, 0.0), fw));
+  vec3 up = cross(fw, rt);
+  vec3 rd = normalize(uv.x * rt + uv.y * up + 1.75 * fw);
+
+  // March toward the ground with small, even steps, then refine the hit (no stair-steps on distant ridges)
+  float t = 0.5, prevT = 0.5, hit = 0.0;
+  for (int i = 0; i < 170; i++) {
+    vec3 p = ro + rd * t;
+    float dy = p.y - height(p.xz);
+    if (dy < 0.0015 * t) { hit = 1.0; break; }
+    prevT = t;
+    t += clamp(dy * 0.35, 0.02, 1.2 + t * 0.02);
+    if (t > 140.0) break;
+  }
+  if (hit > 0.5) {
+    float a = prevT, b = t;
+    for (int i = 0; i < 6; i++) {
+      float m = 0.5 * (a + b);
+      vec3 q = ro + rd * m;
+      if (q.y - height(q.xz) < 0.0) b = m; else a = m;
+    }
+    t = b;
+  }
+
+  float col, depth, dbgWater = 0.0, dbgGlimpse = 0.0;
+  if (hit < 0.5) {
+    col = sky(rd);
+    depth = 1.0;
+  } else {
+    vec3 p = ro + rd * t;
+    vec3 n = uLook > 0.5 ? normalAt(p.xz, t + 30.0) : normalAt(p.xz, t);   // side light: smoother, larger forms
+    // Light from behind the camera and above (not from beyond the hills, which rims every ridge in white); wrapped,
+    // so the shading turns gently from one side of a hill to the other
+    vec3 L = normalize(vec3(-0.55, 0.7, -0.45));
+    float diff = clamp(dot(n, L) * 0.5 + 0.5, 0.0, 1.0);
+    float d = riverDist(p.xz);
+
+    // Ground: pale greys (like the reference, about 215-235 of 255); the lit side stays a light grey, never white
+    col = mix(0.78, 0.93, diff);
+    if (uLook > 0.5) {
+      // Side light from the upper left: slopes facing it light, slopes turned away in soft shade, tops lit by the sky.
+      // The brightest stays a light grey, so no ridge turns white.
+      vec3 S = normalize(vec3(-0.85, 0.5, 0.0));
+      float side = clamp(dot(n, S), 0.0, 1.0);
+      float shade = mix(side, clamp(n.y, 0.0, 1.0), 0.35);
+      diff = shade;
+      col = uLook < 1.5 ? mix(0.76, 0.93, shade) : mix(0.71, 0.935, smoothstep(0.0, 1.0, shade));
+    }
+    col *= 0.96 + 0.04 * smoothstep(-0.1, 3.0, p.y);
+
+    // The river: wide and near white, its edge soft, with a gentle glow on the banks
+    float water = 1.0 - smoothstep(0.7, 1.6, d);
+    dbgWater = water;
+    col = mix(col, 1.0, water);
+    col += 0.05 * exp(-max(d - 1.2, 0.0) * 1.2) * (1.0 - water);
+
+    // Fog: thicker with distance and near the ground, and complete well before the far limit of the march, so the
+    // ground melts into the sky with no visible edge where the rays stop
+    float fog = 1.0 - exp(-t * 0.011 * (0.75 + 0.25 * exp(-max(p.y, 0.0) * 0.35)));
+    fog = max(fog, smoothstep(96.0, 138.0, t));                         // only the farthest ridges melt into the sky
+    col = mix(col, sky(rd), clamp(fog, 0.0, 1.0));
+    depth = clamp(t / 140.0, 0.0, 1.0);
+  }
+  gl_FragColor = vec4(vec3(col), depth);
+#ifdef DEBUG
+  gl_FragColor = vec4(dbgWater, dbgGlimpse, depth, 1.0);
+#endif
+}`;
+// Between two ridges, a thin sliver of far, misty ground or sky reads as a white streak. Where such a sliver is thin and
+// toward the sides (not the misty distance straight ahead), fill it with the ridges above and below it.
+const fill = `
+precision highp float;
+uniform sampler2D uScene;
+uniform vec2 uRes;
+// The farther ridge just above a sliver of this pixel's column, if the sliver is thin (ok > 0), else nothing
+vec4 ridgeAbove(vec2 uv, float depth, vec2 px, out float ok) {
+  float limit = min(depth - 0.2, 0.62);              // only ridges clearly nearer than the sliver, not far specks
+  float ku = 0.0, kd = 0.0;
+  vec4 above = vec4(0.0);
+  for (int k = 1; k <= 72; k++) {
+    float fk = float(k);
+    vec4 a = texture2D(uScene, uv + vec2(0.0, fk * px.y));
+    if (ku == 0.0 && a.a < limit) { ku = fk; above = a; }
+    vec4 b = texture2D(uScene, uv - vec2(0.0, fk * px.y));
+    if (kd == 0.0 && b.a < limit) kd = fk;
+  }
+  ok = (ku > 0.0 && kd > 0.0) ? 1.0 - smoothstep(56.0, 120.0, ku + kd) : 0.0;
+  return above;
+}
+void main() {
+  vec2 px = 1.0 / uRes;
+  vec2 uv = gl_FragCoord.xy * px;
+  vec4 c = texture2D(uScene, uv);
+  float far = smoothstep(0.55, 0.7, c.a);
+  float side = smoothstep(0.05, 0.16, abs(uv.x - 0.5));
+  if (far * side < 0.001) { gl_FragColor = c; return; }
+  // the farther ridge carries on down behind the nearer one; averaged over neighbouring columns so it stays smooth
+  vec4 sum = vec4(0.0);
+  float n = 0.0;
+  for (int i = -6; i <= 6; i++) {
+    float ok;
+    vec4 r = ridgeAbove(uv + vec2(float(i) * 5.0 * px.x, 0.0), c.a, px, ok);
+    sum += r * ok;
+    n += ok;
+  }
+  if (n < 0.001) { gl_FragColor = c; return; }
+  float cover = n / 13.0;
+  gl_FragColor = mix(c, sum / n, far * side * cover * cover * (3.0 - 2.0 * cover));
+}`;
+const post = `
+precision highp float;
+uniform sampler2D uScene;
+uniform vec2 uRes;
+float hash(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec4 c = texture2D(uScene, uv);
+  float low = 1.0 - smoothstep(0.0, 0.5, uv.y);                              // 1 at the bottom edge, 0 from mid-screen up
+  float radius = (10.0 * smoothstep(0.03, 0.45, c.a) + 6.0 * low) * (uRes.y / 540.0);   // far and foreground soft
+  float sum = c.r, weight = 1.0;
+  float spin = hash(gl_FragCoord.xy) * 6.283;
+  for (int i = 0; i < 16; i++) {
+    float fi = float(i);
+    float a = fi * 2.39996 + spin;
+    vec2 o = vec2(cos(a), sin(a)) * sqrt((fi + 0.5) / 16.0) * radius / uRes;
+    vec4 s = texture2D(uScene, uv + o);
+    float w = 0.25 + smoothstep(0.0, 0.17, s.a - c.a + 0.1);           // keep the near, sharp ground from bleeding outward
+    sum += s.r * w;
+    weight += w;
+  }
+  float col = sum / weight;
+  vec2 q = uv - 0.5;
+  col *= 1.0 - 0.05 * smoothstep(0.35, 0.85, length(q * vec2(1.1, 1.0)));
+  col = mix(col, 1.0, 0.85 * low);                                            // the foreground fades to near white
+  gl_FragColor = vec4(vec3(col), 1.0);
+}`;
+
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const gl = canvas.getContext('webgl', { antialias: false, alpha: false, preserveDrawingBuffer: true });
+function compile(type, source) {
+  const s = gl.createShader(type); gl.shaderSource(s, source); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(fragment) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vert)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fragment));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  return p;
+}
+const DEBUG = location.search.includes('debug');
+let LOOK = Number(new URLSearchParams(location.search).get('look') ?? 2);      // 2: the stronger side light (chosen)
+const NOFILL = location.search.includes('nofill');   // for comparison: without the sliver fill
+const scenePass = program((DEBUG ? '#define DEBUG\n' : '') + scene), fillPass = program(fill), postPass = program(post);
+const buffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+function bind(p) { const l = gl.getAttribLocation(p, 'p'); gl.enableVertexAttribArray(l); gl.vertexAttribPointer(l, 2, gl.FLOAT, false, 0, 0); }
+const target = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, target);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+const fbo = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, target, 0);
+const filled = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, filled);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+const fbo2 = gl.createFramebuffer();
+gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, filled, 0);
+
+function draw(phase) {
+  gl.viewport(0, 0, W, H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.useProgram(scenePass); bind(scenePass);
+  gl.uniform2f(gl.getUniformLocation(scenePass, 'uRes'), W, H);
+  gl.uniform1f(gl.getUniformLocation(scenePass, 'uPhase'), phase);
+  gl.uniform1f(gl.getUniformLocation(scenePass, 'uLook'), LOOK);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (DEBUG) {                                   // show the scene pass itself
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.useProgram(scenePass);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return;
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo2);
+  gl.useProgram(fillPass); bind(fillPass);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, target);
+  gl.uniform1i(gl.getUniformLocation(fillPass, 'uScene'), 0);
+  gl.uniform2f(gl.getUniformLocation(fillPass, 'uRes'), W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.useProgram(postPass); bind(postPass);
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, NOFILL ? target : filled);
+  gl.uniform1i(gl.getUniformLocation(postPass, 'uScene'), 0);
+  gl.uniform2f(gl.getUniformLocation(postPass, 'uRes'), W, H);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+const status = document.getElementById('status');
+const rgba = new Uint8Array(W * H * 4);
+// One frame as grey bytes, top row first, with the haze baked in
+function grab() {
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
+  const out = new Uint8Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const src = (H - 1 - y) * W * 4, dst = y * W;
+    for (let x = 0; x < W; x++) out[dst + x] = Math.round(rgba[src + x * 4] * (1 - HAZE) + 255 * HAZE);
+  }
+  return out;
+}
+
+// Key frames for judging a look: the same frames, each look, written by the server through the video's own blur
+async function stills(frames = [150, 550, 950, 1350, 1750, 2150], looks = [2]) {
+  for (const look of looks) {
+    LOOK = look;
+    const chunk = new Uint8Array(W * H * frames.length);
+    frames.forEach((f, j) => { draw(f / FRAMES); chunk.set(grab(), j * W * H); });
+    const r = await fetch('/stills?name=look' + look, { method: 'POST', body: chunk });
+    if (!r.ok) throw new Error('server refused stills');
+  }
+  status.textContent = 'stills written';
+  return 'ok';
+}
+window.stills = stills;
+
+async function record() {
+  const batch = 15;
+  for (let i = 0; i < FRAMES; i += batch) {
+    const n = Math.min(batch, FRAMES - i);
+    const chunk = new Uint8Array(W * H * n);
+    for (let j = 0; j < n; j++) { draw((i + j) / FRAMES); chunk.set(grab(), j * W * H); }
+    const r = await fetch('/frames', { method: 'POST', body: chunk });
+    if (!r.ok) throw new Error('server refused frames at ' + i);
+    status.textContent = `frame ${i + n} / ${FRAMES}`;
+    window.progress = (i + n) / FRAMES;
+  }
+  const r = await fetch('/done', { method: 'POST' });
+  status.textContent = 'done: ' + await r.text();
+  window.progress = 1;
+}
+
+const still = new URLSearchParams(location.search).get('frame');
+if (still !== null) {
+  draw(Number(still) / FRAMES);
+  status.textContent = `frame ${still}`;
+  if (location.search.includes('stretch')) {      // exaggerate the contrast, to see faint streaks
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const x = c.getContext('2d'); x.drawImage(canvas, 0, 0);
+    const img = x.getImageData(0, 0, W, H), d = img.data;
+    for (let i = 0; i < d.length; i += 4) d[i] = d[i + 1] = d[i + 2] = Math.max(0, Math.min(255, (d[i] - 200) * 255 / 55));
+    x.putImageData(img, 0, 0);
+    c.style.cssText = 'position:fixed;inset:0;width:100%;height:auto';
+    document.body.appendChild(c);
+  }
+} else if (location.search.includes('preview')) {
+  const t0 = performance.now();
+  (function loop(now) { draw((((now - t0) / 1000) % SECONDS) / SECONDS); requestAnimationFrame(loop); })(t0);
+} else {
+  draw(0);
+  window.record = record;
+  status.textContent = `ready: ${FRAMES} frames at ${W}x${H}; call record()`;
+}
+</script>
+</body>
+</html>
