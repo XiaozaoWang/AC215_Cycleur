@@ -51,8 +51,9 @@ def test_assistant_proxy_gateway_rag_chroma_and_scoring():
     root = Path(__file__).resolve().parents[2]
     frontend = root / "frontend"
     sys.path.insert(0, str(root / "api-service"))
-    import cli
-    import service
+    from rag import retrieval
+    from rag import generators
+    from rag import service
     from api.service import app as gateway
 
     rag_port, gateway_port, frontend_port = free_port(), free_port(), free_port()
@@ -64,14 +65,14 @@ def test_assistant_proxy_gateway_rag_chroma_and_scoring():
     servers, threads = [], []
     process = None
     # Use a real stored vector as the test query vector; never call embedding APIs.
-    with patch.dict(os.environ, env), patch.object(cli, "CHROMADB_HOST", os.getenv("CHROMADB_HOST", "127.0.0.1")):
-        chroma = cli.chroma_client()
+    with patch.dict(os.environ, env), patch.object(retrieval, "CHROMADB_HOST", os.getenv("CHROMADB_HOST", "127.0.0.1")):
+        chroma = retrieval.chroma_client()
         try:
             collection = chroma.get_collection(service.COLLECTION)
             vector = collection.get(limit=1, include=["embeddings"])["embeddings"][0].tolist()
         finally:
             chroma.close()
-        with patch.object(cli, "generate_embeddings", return_value=[vector]) as embed, patch.object(cli, "llm_client", return_value=cloud):
+        with patch.object(retrieval, "generate_embeddings", return_value=[vector]) as embed, patch.object(generators, "llm_client", return_value=cloud), patch.object(retrieval, "llm_client", return_value=cloud):
             try:
                 for app, port in ((service.app, rag_port), (gateway, gateway_port)):
                     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

@@ -30,7 +30,7 @@ services:
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.1-flash-lite}
       GEMINI_LOCATION: ${GEMINI_LOCATION:-global}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
-      RAG_SERVICE_URL: http://rag-api:8001
+      RAG_SERVICE_URL: ${RAG_SERVICE_URL:-http://rag-api:8001}
       RAG_GATEWAY_TIMEOUT_SECONDS: ${RAG_GATEWAY_TIMEOUT_SECONDS:-50}
 
     # Every 10 seconds Docker opens http://localhost:9000/ inside the container (get_index in service.py),
@@ -63,12 +63,23 @@ services:
 
   # Optional knowledge service: scoring and frontend have no startup dependency on it.
   rag-api:
-    build: ./src/rag-service
+    build:
+      # The build context is src/rag-service; development selects the matching Dockerfile target.
+      context: ./src/rag-service
+      target: development
     image: smartpath-rag-api
+    ports:
+      # Map host localhost:8001 to container port 8001; bind to 127.0.0.1 for access from this machine only.
+      - "127.0.0.1:8001:8001"
     volumes:
-      - ../secrets:/secrets:ro
+      # Mount code for reload; dependencies remain in /.venv and are not hidden by the /app mount.
+      - ./src/rag-service:/app
+      # Mount credentials read-only, outside the image; the default relative path is resolved from the repository root.
+      - ${SECRETS_DIR:-../secrets}:/secrets:ro
     environment:
-      GOOGLE_APPLICATION_CREDENTIALS: /secrets/llm-service-account.json
+      # ${VARIABLE:-DEFAULT} uses the configured environment value or falls back to DEFAULT.
+      # Map host RAG_* settings to the environment variables read by Python modules.
+      GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS_CONTAINER:-/secrets/llm-service-account.json}
       GCP_PROJECT: ${RAG_GCP_PROJECT:-extended-web-508017-j2}
       GCP_LOCATION: ${RAG_GCP_LOCATION:-global}
       GENERATIVE_MODEL: ${RAG_GENERATIVE_MODEL:-gemini-3.1-flash-lite}
@@ -76,13 +87,16 @@ services:
       RAG_CHUNK_TYPE: ${RAG_CHUNK_TYPE:-markdown-split}
       RAG_CLOUD_TIMEOUT_MS: ${RAG_CLOUD_TIMEOUT_MS:-20000}
       CHROMADB_HOST: ${CHROMADB_HOST:-chromadb}
+      # chromadb is the service name on the Docker network, rather than the host's localhost.
       CHROMADB_PORT: ${CHROMADB_PORT:-8000}
       CHROMADB_SSL: ${CHROMADB_SSL:-false}
       ANONYMIZED_TELEMETRY: "false"
     depends_on:
+      # Start Chroma first; service_started does not guarantee loaded knowledge. Check /ready for actual readiness.
       chromadb:
         condition: service_started
     healthcheck:
+      # Check for a compatible, nonempty knowledge base without model calls. An empty database reports unhealthy.
       test: ["CMD", "/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/ready', timeout=4)"]
       interval: 20s
       timeout: 5s
@@ -90,9 +104,10 @@ services:
       start_period: 60s
 
   chromadb:
+    # Use the official image locally; build the cloud restoration image from the Dockerfile chroma target.
     image: chromadb/chroma:1.5.9
     environment:
       ANONYMIZED_TELEMETRY: "false"
     volumes:
-      # Chroma 1.5.9 persists SQLite and vector indexes under /data.
+      # Map Chroma /data to the host directory so the database survives container shutdown or removal.
       - ./src/rag-service/docker-volumes/chromadb:/data

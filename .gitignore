@@ -15,3 +15,6 @@ src/rag-service/docker-volumes/chromadb/
 src/rag-service/input-datasets/
 src/rag-service/*.sqlite*
 src/rag-service/**/*.bin
+
+# Keep RAG tests local.
+src/rag-service/tests/

@@ -5,16 +5,14 @@ import json
 from pathlib import Path
 import sys
 import tarfile
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 import chromadb
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "deploy"))
-import chroma_bootstrap as bootstrap
-import cli
-
-
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from rag import indexing as bootstrap
+from rag import indexing as cli
 def release(tmp_path, tamper=False):
     md = b"# Safety\nCheck brakes."
     row = {"chunk_id": "test-1", "source_id": "TEST", "chunk": "Check brakes."}
@@ -36,18 +34,14 @@ def release(tmp_path, tamper=False):
     return archive
 
 
-def preserve_cli_paths(monkeypatch):
-    monkeypatch.setattr(cli, "INPUT_FOLDER", cli.INPUT_FOLDER)
-    monkeypatch.setattr(cli, "OUTPUT_FOLDER", cli.OUTPUT_FOLDER)
-
-
 def test_restored_release_survives_reopen_without_embeddings(tmp_path, monkeypatch):
-    preserve_cli_paths(monkeypatch)
+    original_paths = (cli.INPUT_FOLDER, cli.OUTPUT_FOLDER)
     archive = release(tmp_path)
     database = tmp_path / "database"
     with patch.object(cli, "generate_embeddings") as embed:
         assert bootstrap.restore_index(archive, tmp_path / "release", database, 1) == 1
     embed.assert_not_called()
+    assert (cli.INPUT_FOLDER, cli.OUTPUT_FOLDER) == original_paths
     reopened = chromadb.PersistentClient(path=str(database))
     try:
         assert reopened.get_collection("greenpath-docs-markdown-split").count() == 1
@@ -56,14 +50,12 @@ def test_restored_release_survives_reopen_without_embeddings(tmp_path, monkeypat
 
 
 def test_tampered_vectors_fail_before_creating_database(tmp_path, monkeypatch):
-    preserve_cli_paths(monkeypatch)
     with pytest.raises(ValueError, match="Embedding file changed"):
         bootstrap.restore_index(release(tmp_path, tamper=True), tmp_path / "release", tmp_path / "database", 1)
     assert not (tmp_path / "database").exists()
 
 
 def test_wrong_release_count_fails_before_creating_database(tmp_path, monkeypatch):
-    preserve_cli_paths(monkeypatch)
     with pytest.raises(ValueError, match="release count"):
         bootstrap.restore_index(release(tmp_path), tmp_path / "release", tmp_path / "database", 398)
     assert not (tmp_path / "database").exists()
@@ -78,3 +70,19 @@ def test_unsafe_archive_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="Unsafe"):
         bootstrap.restore_index(archive, tmp_path / "release", tmp_path / "database", 1)
     assert not (tmp_path / "escape").exists()
+
+
+def test_download_checks_archive_checksum_before_writing(tmp_path):
+    destination = tmp_path / "archive.tar.gz"
+    session = Mock()
+    session.get.return_value.content = b"stored vectors"
+    with patch.object(bootstrap.google.auth, "default", return_value=(Mock(), None)), patch.object(
+            bootstrap, "AuthorizedSession") as factory:
+        factory.return_value.__enter__.return_value = session
+        with pytest.raises(ValueError, match="checksum"):
+            bootstrap.download_index("gs://bucket/path/index.tar.gz", destination, "0" * 64)
+        assert not destination.exists()
+        checksum = hashlib.sha256(b"stored vectors").hexdigest()
+        bootstrap.download_index("gs://bucket/path/index.tar.gz", destination, checksum)
+    assert destination.read_bytes() == b"stored vectors"
+    assert "path%2Findex.tar.gz?alt=media" in session.get.call_args.args[0]

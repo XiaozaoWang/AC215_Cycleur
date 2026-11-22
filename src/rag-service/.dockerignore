@@ -1,5 +1,12 @@
 .venv/
 __pycache__/
+.pytest_cache/
+**/__pycache__/
+.git/
+.env*
+secrets/
+*.tar*
+*.zip
 .env
 outputs/
 docker-volumes/

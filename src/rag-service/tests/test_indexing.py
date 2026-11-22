@@ -12,9 +12,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import cli
-
-
+from rag import indexing as cli
+from rag import indexing as cloud
 class IndexingTests(unittest.TestCase):
     def setUp(self):
         self.clients = []
@@ -89,8 +88,8 @@ class IndexingTests(unittest.TestCase):
             calls.append(kwargs)
             return SimpleNamespace(embeddings=[SimpleNamespace(values=[1.] * 256)])
         fake = SimpleNamespace(models=SimpleNamespace(embed_content=embed_content))
-        with patch.object(cli, "llm_client", return_value=fake):
-            vectors = cli.generate_embeddings(["one", "two"], "RETRIEVAL_DOCUMENT")
+        with patch.object(cloud, "llm_client", return_value=fake):
+            vectors = cloud.generate_embeddings(["one", "two"], "RETRIEVAL_DOCUMENT")
         self.assertEqual([c["contents"] for c in calls], ["one", "two"])
         self.assertEqual(calls[0]["config"].task_type, "RETRIEVAL_DOCUMENT")
         self.assertFalse(calls[0]["config"].auto_truncate)
@@ -116,12 +115,12 @@ class IndexingTests(unittest.TestCase):
         with patch.object(cli, "generate_embeddings", side_effect=lambda rows, task: [[1 / 16] * 256 for _ in rows]):
             cli.embed("markdown-split")
         with patch.object(cli, "chroma_client", return_value=client):
-            cli.load("markdown-split")
-            cli.load("markdown-split")
+            cli.load("markdown-split", client=client)
+            cli.load("markdown-split", client=client)
             collection = client.get_collection("greenpath-docs-markdown-split")
             self.assertEqual(collection.count(), 1)
             collection.add(ids=["stale"], documents=["stale"], embeddings=[[1 / 16] * 256])
-            cli.load("markdown-split", replace=True)
+            cli.load("markdown-split", replace=True, client=client)
             self.assertEqual(client.get_collection(collection.name).count(), 1)
             result = client.get_collection(collection.name).query(query_embeddings=[[1 / 16] * 256], n_results=1)
             self.assertEqual(result["metadatas"][0][0]["source_id"], "GP-TEST")
