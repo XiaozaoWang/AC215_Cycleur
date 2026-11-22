@@ -13,3 +13,6 @@ docker-volumes/
 input-datasets/
 *.sqlite3
 *.bin
+
+# Tests stay local and can be mounted explicitly when needed.
+tests/

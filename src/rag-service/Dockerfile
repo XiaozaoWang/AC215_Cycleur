@@ -21,9 +21,9 @@ COPY --chown=app:app rag ./rag
 ENTRYPOINT ["/bin/bash", "/app/docker-entrypoint.sh"]
 
 # Local Compose and docker-shell.sh select this target, with test tools and automatic code reload.
+# Tests are local-only: mount them at runtime rather than requiring them in a fresh checkout.
 FROM base AS development
 RUN uv sync --frozen --group dev
-COPY --chown=app:app tests ./tests
 COPY --chown=app:app *.sh ./
 ENV RAG_MODE=development
 

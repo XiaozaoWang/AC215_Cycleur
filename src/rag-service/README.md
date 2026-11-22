@@ -18,7 +18,7 @@ rag-service/
     generators.py
     indexing.py
     agent_tools.py
-  tests/
+  tests/                 # optional local-only directory; not tracked by Git
   Dockerfile
   docker-*.sh
   pyproject.toml
@@ -50,7 +50,7 @@ Python pipeline entry point. Runtime knowledge data stays in its existing paths.
 | rag/indexing.py | Markdown/front matter, checksums/manifests, chunk/embed/load, lazy model clients, retry policies, deterministic archive packaging and verified restoration. |
 | pyproject.toml | Existing dependencies, development test group and pytest settings. |
 | uv.lock | Existing exact dependency versions, consumed with --frozen; no upgrades. |
-| tests/ | Offline tests using synthetic temporary indexes, mocked models, shell executables and error paths; optional full-stack test. |
+| tests/ (local only) | Optional offline tests, ignored by Git and excluded from image builds; keep existing copies locally. |
 | README.md | Operating instructions and responsibility map. |
 | .dockerignore | Excludes credentials, knowledge data, archives, databases, virtual environments and caches from image build contexts. |
 
@@ -172,12 +172,14 @@ CHROMADB_HOST=127.0.0.1. Updating Cloud Run itself is outside this service's scr
 
 ```sh
 uv run --frozen pytest -q
-# Self-contained Linux test image using the same Dockerfile:
+# With your optional local tests directory available:
 docker build --target development -t rag-tests .
-docker run --rm --network none rag-tests python -m pytest -q
+docker run --rm --network none -v "$(pwd)/tests:/app/tests:ro" rag-tests python -m pytest -q
 ```
 
-Default tests use temporary synthetic data and mocked cloud calls. POSIX execution
+The tests directory is intentionally not published. A fresh clone can build all
+image targets without tests; the commands above require your local test copies.
+Local tests use temporary synthetic data and mocked cloud calls. POSIX execution
 tests skip on Windows. The optional RAG_STACK_CHECK=1 test requires an existing
 Chroma/frontend stack, reads stored vectors and mocks paid models; it is not run
 by default. Chunking, stored-vector loading, packaging, restoration and health
