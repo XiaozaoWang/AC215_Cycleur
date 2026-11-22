@@ -1,6 +1,6 @@
 """
 Deploy GreenPath to Cloud Run and check that it works. One tool for the three services we deploy ourselves:
-    model      model-service, private (only the API may call it)
+    model      model-service, private (only the API may call it), on one L4 GPU in us-east4
     api        api-service, private (only the frontend may call it)
     frontend   the web app, public
 RAG is deployed on its own (src/rag-service/deploy).
@@ -46,10 +46,14 @@ TOLERANCE = 0.01     # training ran in float16 on a GPU, the service runs float3
 
 # Everything that differs between the three services
 #   invoker: who may call it, "allUsers" means public, otherwise the service account of the caller
-#   model: 1 request per instance (one batch uses all 4 CPUs), up to 100 instances so the API budget of 100 calls always fits
+#   region / tag: only written when different from GCP_REGION / latest
+#   model: up to 3 instances, each with one L4 GPU (our quota is 3 L4 in us-east4); 8 CPUs and 32 GiB is Cloud Run's recommended
+#          size for an L4 (at least 4 and 16 GiB), the CPUs decode the aerial tiles for the GPU; each instance takes 8 requests at a
+#          time, so some batches download their tiles while the GPU scores others
 #   api: a single instance, so all users share one budget of MODEL_MAX_CONCURRENCY model calls; 20 requests at a time
 SERVICES = {
-    "model": dict(name="greenpath-model-service", cpu="4", memory="4Gi", max_instances=100, concurrency=1, timeout=300,
+    "model": dict(name="greenpath-model-service", cpu="8", memory="32Gi", max_instances=3, concurrency=8, timeout=300,
+                  region="us-east4", gpu="nvidia-l4", tag="gpu",
                   invoker="greenpath-api-service", local_url="http://host.docker.internal:8080"),
     "api": dict(name="greenpath-api-service", cpu="2", memory="2Gi", max_instances=1, concurrency=20, timeout=900,
                 invoker="greenpath-frontend", local_url="http://host.docker.internal:9000"),
@@ -59,8 +63,13 @@ SERVICES = {
 UPDATE_PATHS = ["template", "traffic", "ingress", "invoker_iam_disabled", "scaling"]
 
 
+# Where a service lives: its own region if it has one (the model is in us-east4), else GCP_REGION
+def parent(service):
+    return f"projects/{GCP_PROJECT}/locations/{SERVICES[service].get('region', GCP_REGION)}"
+
+
 def full_name(service):
-    return f"{PARENT}/services/{SERVICES[service]['name']}"
+    return f"{parent(service)}/services/{SERVICES[service]['name']}"
 
 
 def account(name):
@@ -94,11 +103,12 @@ def env_for(service, client, model_concurrency):
     if service == "frontend":
         return {"API_SERVICE_URL": client.get_service(name=full_name("api")).uri}
     model = client.get_service(name=full_name("model"))
-    # The API sends at most this many model calls at once. Each call takes one model instance, so the total has to fit
+    # The API sends at most this many model calls at once, so the live model-service has to take them all at once
     budget = model_concurrency * SERVICES["api"]["max_instances"]
-    if budget > model.template.scaling.max_instance_count:
-        sys.exit(f"API would send up to {budget} model calls at once but model-service allows only "
-                 f"{model.template.scaling.max_instance_count} instances. Deploy the model first or lower --model-concurrency.")
+    capacity = model.template.scaling.max_instance_count * model.template.max_instance_request_concurrency
+    if budget > capacity:
+        sys.exit(f"API would send up to {budget} model calls at once but model-service takes only {capacity} "
+                 f"(instances x requests per instance). Deploy the model first or lower --model-concurrency.")
     return {"GCP_PROJECT": GCP_PROJECT, "GREENPATH_BUCKET": BUCKET,
             "GREENPATH_DATASET": os.getenv("GREENPATH_DATASET", "1026_Full_data"),
             "MODEL_SERVICE_URL": model.uri, "MODEL_MAX_CONCURRENCY": str(model_concurrency),
@@ -110,6 +120,8 @@ def env_for(service, client, model_concurrency):
 # The Cloud Run settings for one service, built from SERVICES
 def build_service(service, tag, env):
     s = SERVICES[service]
+    gpu = s.get("gpu")
+    limits = {"cpu": s["cpu"], "memory": s["memory"], **({"nvidia.com/gpu": "1"} if gpu else {})}
     return run_v2.Service(
         # the URL is reachable, but every call is checked against the invoker list (set_access)
         ingress="INGRESS_TRAFFIC_ALL", invoker_iam_disabled=False,
@@ -123,12 +135,16 @@ def build_service(service, tag, env):
             scaling=run_v2.RevisionScaling(min_instance_count=0, max_instance_count=s["max_instances"]),
             max_instance_request_concurrency=s["concurrency"],
             timeout={"seconds": s["timeout"]},
+            # GPU: which card; no spare GPU kept in a second zone (needs less quota and costs less)
+            node_selector=run_v2.NodeSelector(accelerator=gpu) if gpu else None,
+            gpu_zonal_redundancy_disabled=True if gpu else None,
             containers=[run_v2.Container(
-                image=f"{GCP_REGION}-docker.pkg.dev/{GCP_PROJECT}/greenpath/{s['name']}:{tag}",
+                # all images are in the us-central1 Artifact Registry; Cloud Run in us-east4 pulls from there too
+                image=f"{GCP_REGION}-docker.pkg.dev/{GCP_PROJECT}/greenpath/{s['name']}:{tag or s.get('tag', 'latest')}",
                 ports=[run_v2.ContainerPort(container_port=8080)],
-                # cpu_idle: CPU (and billing) only while a request is running; startup boost: extra CPU for faster cold starts
-                resources=run_v2.ResourceRequirements(limits={"cpu": s["cpu"], "memory": s["memory"]},
-                                                      cpu_idle=True, startup_cpu_boost=True),
+                # cpu_idle: CPU (and billing) only while a request is running; Cloud Run requires it off with a GPU, so a GPU
+                # instance is billed while it is up (still 0 instances when idle). startup boost: extra CPU for faster cold starts
+                resources=run_v2.ResourceRequirements(limits=limits, cpu_idle=not gpu, startup_cpu_boost=True),
                 env=[run_v2.EnvVar(name=k, value=v) for k, v in env.items()],
             )],
         ),
@@ -154,9 +170,12 @@ def set_access(client, name, invoker):
 
 
 # --deploy: create or update one service from an image already pushed to Artifact Registry
-def deploy(service, tag="latest", model_concurrency=100):
+# tag None = the service's own tag in SERVICES (gpu for the model, latest for the rest)
+# model_concurrency None = as many calls as model-service takes at once (instances x requests per instance)
+def deploy(service, tag=None, model_concurrency=None):
     client = run_v2.ServicesClient()
     name = full_name(service)
+    model_concurrency = model_concurrency or SERVICES["model"]["max_instances"] * SERVICES["model"]["concurrency"]
     config = build_service(service, tag, env_for(service, client, model_concurrency))
     try:
         client.get_service(name=name)
@@ -164,7 +183,7 @@ def deploy(service, tag="latest", model_concurrency=100):
         operation = client.update_service(service=config, update_mask=FieldMask(paths=UPDATE_PATHS))
         print(f"updating {SERVICES[service]['name']} ...")
     except NotFound:
-        operation = client.create_service(parent=PARENT, service=config, service_id=SERVICES[service]["name"])
+        operation = client.create_service(parent=parent(service), service=config, service_id=SERVICES[service]["name"])
         print(f"creating {SERVICES[service]['name']} ...")
     result = operation.result()
     set_access(client, name, SERVICES[service]["invoker"])
@@ -193,7 +212,7 @@ def test_model(fs, local):
     health = requests.get(f"{url}/health", headers=headers, timeout=300)
     health.raise_for_status()
     h = health.json()
-    print(f"model {h['run_id']} (training set {h['training_id']}) · {h['cells']:,} cells can be scored")
+    print(f"model {h['run_id']} (training set {h['training_id']}) on {h.get('device', 'cpu')} · {h['cells']:,} cells can be scored")
 
     expected = pd.read_parquet(io.BytesIO(fs.cat(f"{BUCKET}/results/{h['training_id']}/final/{h['run_id']}/predictions.parquet")))
     expected = expected.sample(N_TEST, random_state=0)
@@ -243,9 +262,9 @@ def main():
     p.add_argument("--deploy", action="store_true", help="deploy an image that is already pushed")
     p.add_argument("--test", action="store_true", help="check the deployed (or --local) service")
     p.add_argument("--service", choices=SERVICES)
-    p.add_argument("--tag", default=os.getenv("APP_IMAGE_TAG", "latest"), help="image tag, default latest")
-    p.add_argument("--model-concurrency", type=int, choices=range(1, 101), default=100,
-                   help="api only: how many model calls the API sends at once (1-100)")
+    p.add_argument("--tag", default=os.getenv("APP_IMAGE_TAG"), help="image tag, default gpu for model, latest for the rest")
+    p.add_argument("--model-concurrency", type=int, choices=range(1, 101), default=None,
+                   help="api only: how many model calls the API sends at once (1-100), default what the model takes at once")
     p.add_argument("--local", action="store_true", help="with --test: test the local container instead of Cloud Run")
     p.add_argument("--full", action="store_true", help="with --test (api, frontend): also score Boston for real")
     a = p.parse_args()

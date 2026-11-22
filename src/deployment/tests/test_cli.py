@@ -10,13 +10,14 @@ from google.iam.v1.policy_pb2 import Policy
 import cli
 
 
-def live_lookup(model_max=100, missing=None):
-    # Fake Cloud Run lookups: upstream URLs, and the live model-service instance cap used by the API budget check
+def live_lookup(model_max=3, model_concurrency=8, missing=None):
+    # Fake Cloud Run lookups: upstream URLs, and how many calls the live model-service takes at once (for the API budget check)
     def lookup(*, name):
         if missing and name.endswith("/" + missing):
             raise NotFound("new service")
         if name.endswith("/greenpath-model-service"):
-            return SimpleNamespace(uri="https://model.run.app", template=SimpleNamespace(scaling=SimpleNamespace(max_instance_count=model_max)))
+            return SimpleNamespace(uri="https://model.run.app", template=SimpleNamespace(
+                scaling=SimpleNamespace(max_instance_count=model_max), max_instance_request_concurrency=model_concurrency))
         if name.endswith("/greenpath-rag-service"):
             return SimpleNamespace(uri="https://rag.run.app")
         return SimpleNamespace(uri="https://api.run.app")
@@ -46,15 +47,21 @@ def test_deploy_settings_and_access(monkeypatch, service, new):
     config, s = call.kwargs["service"], cli.SERVICES[service]
     template, container = config.template, config.template.containers[0]
     assert config.name == ("" if new else cli.full_name(service))
+    if new:   # the model is created in its own region (us-east4, where the L4 quota is)
+        assert call.kwargs["parent"].endswith("/locations/" + ("us-east4" if service == "model" else cli.GCP_REGION))
     assert template.service_account == f"{s['name']}@{cli.GCP_PROJECT}.iam.gserviceaccount.com"
     assert template.revision.startswith(s["name"] + "-")
     assert container.image.endswith(f"/greenpath/{s['name']}:test")
     # the numbers that must not get mixed up between services
-    expected = {"model": (100, 1, "4", "4Gi"), "api": (1, 20, "2", "2Gi"), "frontend": (3, 20, "1", "512Mi")}[service]
+    expected = {"model": (3, 8, "8", "32Gi"), "api": (1, 20, "2", "2Gi"), "frontend": (3, 20, "1", "512Mi")}[service]
     assert (template.scaling.max_instance_count, template.max_instance_request_concurrency,
             container.resources.limits["cpu"], container.resources.limits["memory"]) == expected
     assert config.scaling.max_instance_count == expected[0]
-    assert container.resources.cpu_idle and container.resources.startup_cpu_boost
+    assert container.resources.startup_cpu_boost
+    # only the model has a GPU; with a GPU Cloud Run requires instance-based billing (cpu_idle off)
+    gpu = service == "model"
+    assert (container.resources.limits.get("nvidia.com/gpu"), template.node_selector.accelerator) == (("1", "nvidia-l4") if gpu else (None, ""))
+    assert template.gpu_zonal_redundancy_disabled == gpu and container.resources.cpu_idle == (not gpu)
     assert container.ports[0].container_port == 8080
     assert not config.invoker_iam_disabled and config.traffic[0].percent == 100
     if not new:
@@ -63,9 +70,9 @@ def test_deploy_settings_and_access(monkeypatch, service, new):
     env = {v.name: v.value for v in container.env}
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
     if service == "model":
-        assert env == {"GREENPATH_BUCKET": cli.BUCKET, "DATASETS": "1026_Full_data", "TORCH_THREADS": "4"}
+        assert env == {"GREENPATH_BUCKET": cli.BUCKET, "DATASETS": "1026_Full_data", "TORCH_THREADS": "8"}
     elif service == "api":
-        assert env["MODEL_MAX_CONCURRENCY"] == "100" and env["MODEL_SERVICE_URL"] == "https://model.run.app"
+        assert env["MODEL_MAX_CONCURRENCY"] == "24" and env["MODEL_SERVICE_URL"] == "https://model.run.app"
         assert env["RAG_SERVICE_URL"] == "https://rag.run.app" and env["LLM_PROVIDER"] == "gemini"
     else:
         assert env == {"API_SERVICE_URL": "https://api.run.app"}
@@ -83,16 +90,16 @@ def test_deploy_settings_and_access(monkeypatch, service, new):
 
 
 def test_api_budget_must_fit_model_instances(monkeypatch):
-    # model-service still capped at 30, API wants 100 calls at once: refuse before touching anything
+    # the live model-service takes 3 instances x 8 requests = 24, the API wants 30 calls at once: refuse before touching anything
     client = Mock()
-    client.get_service.side_effect = live_lookup(model_max=30)
+    client.get_service.side_effect = live_lookup()
     monkeypatch.setattr(cli.run_v2, "ServicesClient", Mock(return_value=client))
     with pytest.raises(SystemExit, match="Deploy the model first"):
-        cli.deploy("api")
+        cli.deploy("api", model_concurrency=30)
     client.update_service.assert_not_called()
     client.create_service.assert_not_called()
-    # a budget that fits is fine
-    client.get_service.side_effect = live_lookup(model_max=30)
+    # the old CPU model-service (30 instances x 1 request each) takes 30
+    client.get_service.side_effect = live_lookup(model_max=30, model_concurrency=1)
     client.update_service.return_value.result.return_value = SimpleNamespace(uri="https://new.run.app")
     client.get_iam_policy.return_value = policy()
     cli.deploy("api", model_concurrency=30)

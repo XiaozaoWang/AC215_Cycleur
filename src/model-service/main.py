@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 import scorer    # importing it already loads the model and the cell index, then every request just uses them
 
-# Max cells per request. Bigger areas are split by api-service into several parts sent at once: each part goes to one instance, more instances is faster
+# Max cells per request. Bigger areas are split by api-service into several parts sent at once: one GPU instance works on several parts at a time
 MAX_CELLS = 2000
 
 app = FastAPI(title="GreenPath model service")
@@ -30,17 +30,19 @@ class PredictRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok", "run_id": scorer.RUN_ID, "training_id": scorer.TRAINING_ID,
-            "targets": scorer.TARGETS, "cells": len(scorer.INDEX)}
+            "targets": scorer.TARGETS, "cells": len(scorer.INDEX), "device": scorer.DEVICE}
 
 
 # The real endpoint: cells in, scores out. Answer: {"run_id", "results": [{"h3_index", "status", "scores"}, ...]}, same order as the request
 @app.post("/predict")
 def predict(req: PredictRequest):
     t0 = time.time()
-    results = scorer.score_cells(req.h3_indices)
+    timings = {}
+    results = scorer.score_cells(req.h3_indices, timings)
     # One JSON log line per request (monitoring): Cloud Run puts it into Cloud Logging automatically, searchable by field, e.g. requests with a lot of cells whose image can't be used
+    # download_s / decode_s / model_s: where the time went (bucket, CPU, GPU), to see which part to speed up
     print(json.dumps({"event": "predict", "cells": len(results), "status": Counter(r["status"] for r in results),
-                      "seconds": round(time.time() - t0, 2)}), flush=True)
+                      "seconds": round(time.time() - t0, 2), **{f"{k}_s": round(v, 3) for k, v in timings.items()}}), flush=True)
     return {"run_id": scorer.RUN_ID, "results": results}
 
 

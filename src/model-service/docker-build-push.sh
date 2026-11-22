@@ -1,6 +1,7 @@
 #!/bin/bash
-# Use before going to the cloud: build the image for Google's machine architecture (linux/amd64) and push it to Artifact Registry. Then run `python cli.py --deploy --service model` in src/deployment
+# Use before going to the cloud: build the image in Google's Cloud Build and store it in Artifact Registry, tagged :gpu. Then run `python cli.py --deploy --service model` in src/deployment
 # Run it again after changing the model (--prepare) or the code. The image has the model, but no keys or tokens.
+# Built in the cloud, not on your computer: CUDA torch makes the image several GB, Cloud Build downloads it inside Google and we only upload the code and artifacts/ (about 15 MB).
 # Commands for first-time setup (once per project, once per person) are in data-processor/docker-build-push.sh
 
 set -e
@@ -17,7 +18,8 @@ if [ ! -f artifacts/best_model.pt ]; then
     exit 1
 fi
 
-# amd64: Cloud Run machines are amd64; on an Apple chip Mac the build is emulated, slower than docker-shell.sh
-docker build --platform linux/amd64 -t $IMAGE_URI:latest --push -f Dockerfile .
+# Upload this folder (what is left out is in .gcloudignore), build it from the Dockerfile on an amd64 machine, and push the image.
+# Tagged :gpu, so the old CPU image (:latest) stays in Artifact Registry and can still be deployed with --tag latest
+gcloud builds submit --project "$GOOGLE_CLOUD_PROJECT" --region us-central1 --tag "$IMAGE_URI:gpu" .
 
-echo "Pushed $IMAGE_URI:latest"
+echo "Pushed $IMAGE_URI:gpu"

@@ -7,6 +7,7 @@ The 3 files in artifacts/ (best_model.pt, config.json, network.py) are prepared 
 import io
 import json
 import os
+import time
 
 import gcsfs
 import pandas as pd
@@ -17,7 +18,8 @@ from artifacts import network as N    # the same network.py used in training: bu
 
 BUCKET = os.environ["GREENPATH_BUCKET"]
 DATASETS = os.environ["DATASETS"].split(",")      # areas that can be scored = cells in these datasets with downloaded aerial tiles, e.g. 1026_Full_data
-BATCH_SIZE = 64                                   # how many images the model computes at once
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"   # the L4 GPU on Cloud Run; the CPU on a laptop or in tests
+BATCH_SIZE = 256 if DEVICE == "cuda" else 64      # how many images the model computes at once
 
 # How many CPU threads to use: on Cloud Run --deploy sets it to the number of CPUs this instance gets; not set locally, so torch's default
 if os.environ.get("TORCH_THREADS"):
@@ -32,7 +34,7 @@ TARGETS = CONFIG["targets"]                       # names of the 15 scores, orde
 # Step 2: the model. First build the full DINOv2 + linear layer, then swap in the trained part; eval() = score only, no training
 MODEL = N.build_model(len(TARGETS))
 N.load_weights(MODEL, "artifacts/best_model.pt")
-MODEL.eval()
+MODEL.to(DEVICE).eval()
 TRANSFORM = N.eval_transform()                    # preprocessing: resize to 224x224, normalize
 
 # Tool to read/write the bucket. Identity: locally = the mounted gcloud login; Cloud Run = the service account attached to the service
@@ -50,29 +52,38 @@ def load_index():
 
 
 INDEX = load_index()
-print(f"model {RUN_ID} ready · {len(TARGETS)} scores · {len(INDEX):,} cells from {DATASETS}", flush=True)
+print(f"model {RUN_ID} ready on {DEVICE} · {len(TARGETS)} scores · {len(INDEX):,} cells from {DATASETS}", flush=True)
 
 
 # A batch of images (raw bytes of PNG files), one set of scores per image {score name: 0-1}
-# Same as in training: open image, convert to RGB, preprocess, model; 64 images at a time
+# Same as in training: open image, convert to RGB, preprocess (on the CPU), model (on the GPU if there is one); BATCH_SIZE images at a time
+# timings: when given, the seconds spent decoding images (CPU) and running the model (GPU) are added to it, for the log line in main.py
 @torch.inference_mode()                           # scoring only: no gradients, faster and less memory
-def score_images(images):
+def score_images(images, timings=None):
+    timings = {} if timings is None else timings
     rows = []
     for i in range(0, len(images), BATCH_SIZE):
+        t0 = time.perf_counter()
         x = torch.stack([TRANSFORM(Image.open(io.BytesIO(b)).convert("RGB")) for b in images[i:i + BATCH_SIZE]])
-        rows += MODEL(x).tolist()
+        t1 = time.perf_counter()
+        rows += MODEL(x.to(DEVICE)).cpu().tolist()    # .cpu() waits for the GPU to finish, so the timing is right
+        timings["decode"] = timings.get("decode", 0) + t1 - t0
+        timings["model"] = timings.get("model", 0) + time.perf_counter() - t1
     return [dict(zip(TARGETS, (round(v, 4) for v in row))) for row in rows]
 
 
 # A batch of H3 cells, one result per cell, same order as the request: {"h3_index", "status", "scores"}
 # status: ok = scored; not_downloaded = not among the cells of DATASETS;
 #         no_naip_coverage / mostly_black = the collector decided this cell's aerial tile can't be used (no NAIP / mostly black), not scored, scores is null
-def score_cells(h3_indices):
+def score_cells(h3_indices, timings=None):
+    timings = {} if timings is None else timings
     found = INDEX.reindex(h3_indices)                             # look up the index in request order; cells not found get an empty row
     usable = found.tile_ok.eq(True).to_numpy()                    # has an image, and the image can be used
     status = found.tile_reason.fillna("not_downloaded").where(~usable, "ok")
     paths = [f"{BUCKET}/{p}" for p in found.tile_path[usable]]
-    images = FS.cat(paths)                                        # download these images from the bucket in parallel: {path: image bytes}
-    scores = iter(score_images([images[p] for p in paths]))
+    t0 = time.perf_counter()
+    images = FS.cat(paths) if paths else {}                       # download these images from the bucket in parallel: {path: image bytes}; nothing to download when no cell is usable
+    timings["download"] = time.perf_counter() - t0
+    scores = iter(score_images([images[p] for p in paths], timings))
     return [{"h3_index": h, "status": s, "scores": next(scores) if u else None}
             for h, s, u in zip(h3_indices, status, usable)]

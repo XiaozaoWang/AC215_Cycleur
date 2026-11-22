@@ -1,0 +1,6 @@
+# What `gcloud builds submit` (docker-build-push.sh) does not upload.
+# Without this file gcloud follows .gitignore, skips artifacts/, and the image has no model.
+.gcloudignore
+.venv/
+__pycache__/
+.env
