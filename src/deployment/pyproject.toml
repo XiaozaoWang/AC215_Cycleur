@@ -1,8 +1,8 @@
-# Deployment tool: deploys model-service, api-service and frontend to Cloud Run. uv.lock pins the versions.
+# Deployment tool: deploys model-service, api-service and frontend to Cloud Run, and the whole app to GKE. uv.lock pins the versions.
 [project]
 name = "greenpath-deployment"
 version = "0.1.0"
-description = "GreenPath deployment: prepare the model, deploy and test model-service, api-service and frontend on Cloud Run"
+description = "GreenPath deployment: prepare the model, deploy and test the services on Cloud Run, or the whole app on GKE"
 requires-python = ">=3.12,<3.15"
 dependencies = [
     "google-cloud-run>=0.10,<1",   # create and update Cloud Run services and who may call them
@@ -11,6 +11,9 @@ dependencies = [
     "pandas>=2.2,<3",
     "pyarrow>=19,<24",
     "requests>=2.32,<3",           # live tests
+    "pulumi==3.272.0",             # Kubernetes: the Pulumi programs (same versions as the tutorial)
+    "pulumi-docker-build==0.0.22", # deploy_images builds and pushes the images
+    "pulumi-gcp==10.2.0",          # the static IP, the network and the GKE cluster
 ]
 
 [dependency-groups]

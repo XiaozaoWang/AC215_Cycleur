@@ -1,0 +1,4 @@
+# The deployment shell's generated overlays and cluster credentials, Pulumi plugins and Docker login
+.local/
+pulumi-plugins/
+docker-config/

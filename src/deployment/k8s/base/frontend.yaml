@@ -1,0 +1,41 @@
+# The web app (Next.js). Its server forwards /api/* to the API inside the cluster, so the API stays private.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  labels: { app: frontend }
+spec:
+  replicas: 2 # two copies, so the page keeps loading whatever happens to a node
+  selector:
+    matchLabels: { app: frontend } # the glue: the Service uses the same label
+  template:
+    metadata:
+      labels: { app: frontend }
+    spec:
+      automountServiceAccountToken: false # calls nothing in Google Cloud
+      containers:
+        - name: frontend
+          image: greenpath-frontend # pinned to the pushed image by deploy-k8s.sh
+          ports: [{ name: http, containerPort: 3000 }]
+          env:
+            - name: API_SERVICE_URL # plain http inside the cluster: no Cloud Run ID token needed
+              value: http://api-service:9000
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 512Mi } # the same memory as on Cloud Run
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+          lifecycle:
+            # Keep serving while Google's load balancer detaches the pod, which can take well over
+            # 15 s. Without this, a rolling update drops requests.
+            preStop:
+              sleep: { seconds: 30 }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend # the Gateway sends every request here (k8s/gke/gateway.yaml)
+spec:
+  selector: { app: frontend }
+  ports: [{ name: http, port: 3000, targetPort: http }]

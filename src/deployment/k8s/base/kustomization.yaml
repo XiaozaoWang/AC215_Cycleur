@@ -1,0 +1,16 @@
+# The GreenPath workloads, the same on every cluster. ../gke/ adds the Gateway, Google's load balancer;
+# ../../scripts/deploy-k8s.sh adds your project's settings and the images deploy_images pushed, then runs
+# `kubectl apply -k`.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: greenpath
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: greenpath
+resources:
+  - namespace.yaml
+  - vector-db.yaml
+  - rag-service.yaml
+  - model-service.yaml
+  - api-service.yaml
+  - frontend.yaml

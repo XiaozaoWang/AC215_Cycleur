@@ -1,0 +1,6 @@
+name: greenpath-base
+description: Long-lived pieces that outlive the cluster - the Gateway's static IP
+runtime:
+  name: python
+  options:
+    virtualenv: /.venv

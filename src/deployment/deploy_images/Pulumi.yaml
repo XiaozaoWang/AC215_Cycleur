@@ -1,0 +1,6 @@
+name: greenpath-images
+description: Builds the GreenPath images and pushes them to Artifact Registry
+runtime:
+  name: python
+  options:
+    virtualenv: /.venv

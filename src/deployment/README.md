@@ -1,5 +1,10 @@
 # Deployment
 
+Two ways to run GreenPath, from the same deployment container (`sh docker-shell.sh`):
+[Cloud Run](#cloud-run), one service at a time, or [Kubernetes on GKE](#kubernetes-on-gke), the whole app in one cluster.
+
+## Cloud Run
+
 One tool for the three Cloud Run services we deploy: `model` (model-service), `api` (api-service), `frontend`.
 RAG is deployed separately (`src/rag-service/deploy`). Settings for each service are in the `SERVICES` table in `cli.py`.
 
@@ -26,3 +31,45 @@ python cli.py --deploy --service frontend && python cli.py --test --service fron
 ```
 
 First time only: enable the Cloud Run Admin API and the Cloud Build API, create the service accounts `greenpath-model-service` (Storage Object Viewer on the bucket), `greenpath-api-service` (Vertex AI User, Storage Object Viewer) and `greenpath-frontend`, and get the Cloud Run quota of 3 NVIDIA L4 GPUs without zonal redundancy in us-east4.
+
+## Kubernetes on GKE
+
+The same images on a GKE cluster, built the way the Kubernetes tutorial builds it: Pulumi for the cloud pieces,
+plain YAML for the workloads. The model runs on CPUs for now (GKE has no L4 quota yet).
+
+| In the cluster (namespace `greenpath`) | Copies | Where | What it is |
+|---|---|---|---|
+| `frontend` | 2 | web pool | The page (Next.js); forwards `/api/*` to the API. The only thing reached from outside, through the Gateway |
+| `api-service` | 2 | web pool | Reads the ride with Gemini, plans the routes, sends at most 4 batches at once to the model |
+| `model-service` | 4 | model pool, one per node | Scores the cells, 3 CPUs each |
+| `rag-service` | 1 | web pool | Answers questions with Gemini and Chroma |
+| `vector-db` | 1 | web pool | Chroma; restores the knowledge from Cloud Storage when it starts, as on Cloud Run |
+
+Run everything in the deployment container. First time only: push the model image with
+`src/model-service/docker-build-push.sh` (the cluster uses its `:gpu` image).
+
+```sh
+# The static IP for the Gateway (once)
+cd /app/src/deployment/deploy_base && pulumi stack select dev --create && pulumi up --stack dev -y
+# Build and push frontend, api, rag and chroma (tagged by a hash of their files); pin the model image
+cd /app/src/deployment/deploy_images && pulumi stack select dev --create && pulumi up --stack dev -y
+# The network, the cluster and its two node pools (3 x e2-standard-2, 4 x e2-standard-4), about 10 minutes
+cd /app/src/deployment/deploy_k8s && pulumi stack select dev --create && pulumi up --stack dev -y
+# Apply k8s/gke with your project's settings and the pinned images, wait, and print the app's address
+cd /app/src/deployment && ./scripts/deploy-k8s.sh
+```
+
+Watch it with `kubectl -n greenpath get pods -o wide`. A whole area takes about 2 minutes to score (4 pods x 3 CPUs).
+
+| File | What it does |
+|---|---|
+| `deploy_base/__main__.py` | The Gateway's static IP (the image registry already exists) |
+| `deploy_images/__main__.py` | Builds and pushes the images, tagged by a hash of their files; pins the model's `:gpu` image |
+| `deploy_k8s/` | The network, Cloud NAT, the cluster, its web and model node pools, and Workload Identity |
+| `k8s/base/` | The five workloads, the same on every cluster |
+| `k8s/gke/gateway.yaml` | The Gateway: one public address, everything to the frontend, a 15-minute timeout |
+| `scripts/deploy-k8s.sh` | Pins the images and your settings in an overlay (`.local/`), then applies `k8s/gke` |
+| `scripts/destroy-k8s.sh` | Takes the cluster down in the right order |
+
+The cluster bills by the hour, unlike Cloud Run: take it down when you are done (about 15 minutes):
+`cd /app/src/deployment && ./scripts/destroy-k8s.sh`. First time only: enable the Kubernetes Engine API.

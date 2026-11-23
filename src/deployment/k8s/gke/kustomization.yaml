@@ -1,0 +1,10 @@
+# The workloads on GKE: everything in base/, plus one public entrance through Google's load balancer.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: greenpath
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: greenpath
+resources:
+  - ../base
+  - gateway.yaml

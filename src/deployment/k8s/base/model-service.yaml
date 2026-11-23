@@ -1,0 +1,60 @@
+# The Model Service: scores H3 cells from their aerial tiles. On CPUs for now: 4 pods, one per model node,
+# each scoring one batch at a time with 3 threads. Only the API calls it, inside the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: model-service # deploy-k8s.sh adds the Workload Identity annotation; deploy_k8s binds this name
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-config
+data:
+  DATASETS: 1026_Full_data # the areas that can be scored
+  TORCH_THREADS: "3" # one thread per CPU the pod asks for
+  GREENPATH_BUCKET: "" # deploy-k8s.sh fills it in for your project
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-service
+  labels: { app: model-service }
+spec:
+  replicas: 4 # fixed, one per model node (no HPA for now)
+  selector:
+    matchLabels: { app: model-service } # the glue: the Service uses the same label
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 0, maxUnavailable: 1 } # every model node is full: replace one pod at a time
+  template:
+    metadata:
+      labels: { app: model-service }
+    spec:
+      serviceAccountName: model-service
+      nodeSelector: { pool: model } # the model node pool (deploy_k8s/create_cluster.py)
+      tolerations: # which is tainted, so only these pods run there
+        - { key: pool, operator: Equal, value: model, effect: NoSchedule }
+      containers:
+        - name: model-service
+          image: greenpath-model-service # the :gpu image, pinned by deploy-k8s.sh; with no GPU it uses the CPU
+          ports: [{ name: http, containerPort: 8080 }]
+          envFrom:
+            - configMapRef: { name: model-config }
+          resources:
+            requests: { cpu: "3", memory: 4Gi } # 3 of the node's 4 CPUs: the 4th is left to GKE's own pods
+            limits: { memory: 8Gi }
+          startupProbe: # loading the model and the cell index takes a while
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-service # the name the API calls: http://model-service:8080
+spec:
+  selector: { app: model-service }
+  ports: [{ name: http, port: 8080, targetPort: http }]

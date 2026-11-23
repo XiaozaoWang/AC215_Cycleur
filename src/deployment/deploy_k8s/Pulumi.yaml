@@ -1,0 +1,6 @@
+name: greenpath-k8s
+description: The GKE cluster - a VPC with Cloud NAT, private nodes, two node pools and Workload Identity
+runtime:
+  name: python
+  options:
+    virtualenv: /.venv

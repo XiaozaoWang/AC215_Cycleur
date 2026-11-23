@@ -1,0 +1,55 @@
+# Chroma, the vector database for RAG. Unlike the tutorial (the official image, a disk, and a Job that loads
+# it once), this is rag-service's chroma image: every time it starts, it restores the knowledge from Cloud
+# Storage, as on Cloud Run. So no disk and no Job, and a plain Deployment instead of a StatefulSet.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vector-db # deploy-k8s.sh adds the Workload Identity annotation; deploy_k8s binds this name
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vector-db
+  labels: { app: vector-db }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: vector-db } # the glue: the Service uses the same label
+  template:
+    metadata:
+      labels: { app: vector-db }
+    spec:
+      serviceAccountName: vector-db
+      containers:
+        - name: vector-db
+          image: greenpath-rag-chroma # pinned to the pushed image by deploy-k8s.sh
+          ports: [{ name: http, containerPort: 8000 }]
+          env:
+            # The knowledge release to restore (398 passages): the same one Cloud Run uses
+            - name: RAG_INDEX_URI
+              value: gs://organic-victory-508017-v9-rag/indexes/4984db11bc426abc/index-data.tar.gz
+            - name: RAG_INDEX_SHA256
+              value: 4984db11bc426abc8df8498670c0c98cbd07c98c2462ca481ff0d57315e757cc
+            - name: RAG_EXPECTED_COUNT
+              value: "398"
+            - name: ANONYMIZED_TELEMETRY
+              value: "false"
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { memory: 1Gi } # the same memory as on Cloud Run
+          readinessProbe: # Chroma only listens once the knowledge is restored
+            tcpSocket: { port: http }
+            periodSeconds: 5
+          volumeMounts:
+            - { name: data, mountPath: /data } # the restored database, rebuilt at every start
+      volumes:
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector-db # the name RAG calls: http://vector-db:8000
+spec:
+  selector: { app: vector-db }
+  ports: [{ name: http, port: 8000, targetPort: http }]
