@@ -17,6 +17,12 @@ RAG is deployed separately (`src/rag-service/deploy`). Settings for each service
 The API sends at most `--model-concurrency` model calls at once (default: what model-service takes, 3 instances x 8 = 24). `--deploy --service api` refuses to deploy if the live model-service cannot take that many, so deploy the model first.
 The model image is `:gpu` by default; `--tag latest` deploys the old CPU image.
 
+Routing baselines are versioned by `src/api-service/data/baselines/manifest.json`.
+The deployment CLI compares its `model_run_id` and `training_id` with Model Service `/health`
+before deploying the API, after deploying the model, and during `--test` validation.
+A missing/invalid manifest, unavailable health endpoint, or version mismatch fails the command;
+a model mismatch after rollout means that rollout is not considered valid. No per-request check is added.
+
 ```sh
 # Mac: push the image of the service you changed
 cd src/model-service && sh docker-build-push.sh        # builds in Cloud Build; or src/api-service, src/frontend

@@ -3,6 +3,7 @@ import time
 import chromadb
 from rag.indexing import generate_embeddings, llm_client
 from rag.settings import CHROMADB_HOST, CHROMADB_PORT, CHROMADB_SSL, EMBEDDING_MODEL, EMBEDDING_DIMENSION
+from rag.logging import log_event
 
 def chroma_client(max_attempts=15):
     for attempt in range(max_attempts):
@@ -52,13 +53,9 @@ def retrieve(method, question, n_results=5, *, client_factory=None, embed_func=N
 
 
 def query(method, question, n_results=5):
-    """Print retrieved passages without generating an answer."""
-    print("query()")
+    """Retrieve without generating an answer; log counts rather than private text."""
     results = retrieve(method, question, n_results)
-    print("Question:", question)
-    for rank, (doc, meta, dist) in enumerate(zip(results["documents"][0], results["metadatas"][0], results["distances"][0]), 1):
-        print(f"\n#{rank}  distance={dist:.3f}  {meta.get('source_id')}  {meta.get('title')}  [{meta.get('section')}]")
-        print(doc[:300].replace("\n", " "), "...")
+    log_event("rag_completed", "RAG retrieval completed", retrieved_chunk_count=len(results["documents"][0]))
 
 
 def validate_collection(collection):

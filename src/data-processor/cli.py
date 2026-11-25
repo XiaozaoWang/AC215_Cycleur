@@ -17,6 +17,7 @@ import logging
 import os
 from pathlib import Path
 import re
+import time
 import uuid
 
 import gcsfs
@@ -26,7 +27,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-LOG = logging.getLogger(__name__)
+
+def log_event(event, message, severity="INFO", **fields):
+    print(json.dumps({"severity": severity, "message": message, "service": "data-processor",
+                      "event": event, "request_id": None, "trace_id": None, **fields}), flush=True)
 
 
 # ==================== 1. Functions for reading data ====================
@@ -390,8 +394,8 @@ def load_inputs(root: str, street_id: str, aerial_id: str, spatial: SpatialConfi
         raise ValueError("Aerial labels do not resolve to complete cell metadata.")
     if street.image_path.isna().any():
         raise ValueError("Street image paths are missing.")
-    LOG.info("Loaded %s street relationships and %s aerial cells across %s areas",
-             len(street), len(aerial), cells.area_id.nunique())
+    log_event("processor_data_loaded", "Label data loaded", street_relationship_count=len(street),
+              aerial_cell_count=len(aerial), area_count=int(cells.area_id.nunique()))
     return street, tiles, aerial, street_dims, aerial_dims
 
 # Run rules 1, 2, 3 and combine them into one list
@@ -548,7 +552,7 @@ def load_preparation_inputs(source: Inputs, config: PreparationConfig) -> Prepar
     # 1026 was already cleaned, so there are none; a newly collected dataset may have a few
     bad = ~data.cells.tile_ok.astype(bool)
     if bad.any():
-        LOG.warning("Dropping %s cells without a usable aerial tile", int(bad.sum()))
+        log_event("unusable_tiles_removed", "Dropping cells without a usable aerial tile", severity="WARNING", cell_count=int(bad.sum()))
         keep = set(data.cells.cell_id[~bad])
         data.cells, data.osm = data.cells[~bad].reset_index(drop=True), data.osm[data.osm.cell_id.isin(keep)]
         data.streetview = data.streetview[data.streetview.cell_id.isin(keep)]
@@ -610,7 +614,7 @@ def assign_splits(cells: pd.DataFrame, config: PreparationConfig) -> pd.DataFram
     # if only some are there, a name is probably misspelled, so raise an error
     present = set(config.test_areas) & set(boxes.index)
     if not present:
-        LOG.warning("None of the Test areas are in this dataset: no Test split")
+        log_event("test_split_unavailable", "None of the Test areas are in this dataset", severity="WARNING")
     elif present != set(config.test_areas):
         raise ValueError(f"Unknown Test areas: {sorted(set(config.test_areas) - present)}")
 
@@ -651,12 +655,12 @@ def load_manual_flags(source: Inputs, csv_path: str | None):
 
     # Not there: return an empty table with only the header, and no hash
     if not exists:
-        LOG.info("No manual reviewer flags (%s)", csv_path)
+        log_event("manual_flags_unavailable", "No manual reviewer flags")
         return pd.DataFrame(columns=columns), None
 
     # There: read it (read_flags is at line 75), drop exact duplicate rows, compute the hash
     flags, raw_csv = read_flags(csv_path)
-    LOG.info("Manual reviewer flags: %s", csv_path)
+    log_event("manual_flags_loaded", "Manual reviewer flags loaded")
     return flags[columns].drop_duplicates(), hashlib.sha256(raw_csv).hexdigest()[:16]
 
 
@@ -876,8 +880,8 @@ def prepare_dataset(source: Inputs, config: PreparationConfig, manual_flags_csv:
     out, groups, funnel = assemble_table(data, kept, scores, config)
     validate_table(out)
     metadata = build_metadata(out, groups, funnel, scores, exclusions, flags, csv_hash, config)
-    LOG.info("Prepared %s cells / %s columns; splits: %s; removed %s cells",
-             len(out), len(out.columns), metadata["counts"], len(removed))
+    log_event("training_table_prepared", "Training table prepared", cell_count=len(out),
+              column_count=len(out.columns), split_counts=metadata["counts"], removed_cell_count=len(removed))
     return out, exclusions, metadata
 
 
@@ -906,7 +910,7 @@ def write_prepared(result, output_dir: str):
         out.to_parquet(folder / "dataset.parquet", index=False)
         exclusions.to_parquet(folder / "exclusions.parquet", index=False)
         (folder / "meta.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
-    LOG.info("Saved prepared dataset, metadata and exclusions to %s", output_dir)
+    log_event("training_table_saved", "Prepared dataset, metadata and exclusions saved")
 
 
 # ==================== Command line ====================
@@ -931,6 +935,7 @@ def parser() -> argparse.ArgumentParser:
 
 # Entry point: read args, decide where to read and write, then run usage 1 (--prepare) or usage 2 (detection only)
 def main() -> None:
+    started = time.perf_counter()
     # Logging: print INFO level; skip the per-file read/write details, keep only summaries
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     logging.getLogger("fsspec").setLevel(logging.WARNING)
@@ -955,6 +960,10 @@ def main() -> None:
                                    aerial_id=args.aerial_id, training_id=training_id)
         result = prepare_dataset(Inputs(root), config, args.manual_flags_csv)
         write_prepared(result, args.output_dir or f"{out_root}/training/{training_id}")
+        counts = result[2]["counts"]
+        log_event("processor_completed", "Training dataset preparation completed", training_id=training_id,
+                  train_cells=counts["train"], val_cells=counts["val"], test_cells=counts["test"],
+                  target_count=len(TARGETS), elapsed_seconds=round(time.perf_counter() - started, 2))
         return
 
     # Usage 2: detection only (rule 3 thresholds use the SpatialConfig defaults), writes to gs://<bucket>/candidates/<time>/candidates.parquet
@@ -968,9 +977,12 @@ def main() -> None:
         "spatial": asdict(config), "rule_version": "1.2.0", "purpose": "exclusion candidates only",
         "policy": "Union of three detection rules; no correction actions or score edits",
     })
-    LOG.info("Candidate records by rule: %s", candidates.groupby("candidate_type").size().to_dict())
-    LOG.info("Wrote %s records (%s distinct source/image IDs) to %s", len(candidates),
-             len(candidates[["source", "image_id"]].drop_duplicates()), output)
+    log_event("processor_completed", "Candidate detection completed", dataset_id=args.dataset_id,
+              candidate_count=len(candidates), elapsed_seconds=round(time.perf_counter() - started, 2))
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        log_event("processor_failed", "Data processing failed", severity="ERROR", error_type=type(error).__name__)
+        raise SystemExit(1) from None

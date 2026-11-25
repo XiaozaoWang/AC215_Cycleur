@@ -1,4 +1,5 @@
 import io
+import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -8,6 +9,13 @@ from google.api_core.exceptions import NotFound
 from google.iam.v1.policy_pb2 import Policy
 
 import cli
+
+
+@pytest.fixture
+def baseline_check(monkeypatch):
+    check = Mock()
+    monkeypatch.setattr(cli, "check_baseline_model", check)
+    return check
 
 
 def live_lookup(model_max=3, model_concurrency=8, missing=None):
@@ -34,7 +42,7 @@ def policy():
 
 
 @pytest.mark.parametrize("service,new", [("model", True), ("model", False), ("api", False), ("frontend", False)])
-def test_deploy_settings_and_access(monkeypatch, service, new):
+def test_deploy_settings_and_access(monkeypatch, service, new, baseline_check):
     client = Mock()
     client.get_service.side_effect = live_lookup(missing=cli.SERVICES[service]["name"] if new else None)
     client.create_service.return_value.result.return_value = SimpleNamespace(uri="https://new.run.app")
@@ -42,6 +50,7 @@ def test_deploy_settings_and_access(monkeypatch, service, new):
     client.get_iam_policy.return_value = policy()
     monkeypatch.setattr(cli.run_v2, "ServicesClient", Mock(return_value=client))
     cli.deploy(service, tag="test")
+    assert baseline_check.call_count == int(service in ("api", "model"))
 
     call = client.create_service.call_args if new else client.update_service.call_args
     config, s = call.kwargs["service"], cli.SERVICES[service]
@@ -89,7 +98,7 @@ def test_deploy_settings_and_access(monkeypatch, service, new):
         assert f"serviceAccount:{caller}@{cli.GCP_PROJECT}.iam.gserviceaccount.com" in members
 
 
-def test_api_budget_must_fit_model_instances(monkeypatch):
+def test_api_budget_must_fit_model_instances(monkeypatch, baseline_check):
     # the live model-service takes 3 instances x 8 requests = 24, the API wants 30 calls at once: refuse before touching anything
     client = Mock()
     client.get_service.side_effect = live_lookup()
@@ -107,7 +116,7 @@ def test_api_budget_must_fit_model_instances(monkeypatch):
     assert env["MODEL_MAX_CONCURRENCY"] == "30"
 
 
-def test_model_parity_test_passes_and_fails(monkeypatch):
+def test_model_parity_test_passes_and_fails(monkeypatch, baseline_check):
     targets = ["tree_canopy", "water_access"]
     cells = [f"area_8a2a{i:011x}" for i in range(60)]
     expected = pd.DataFrame({"cell_id": cells, "tree_canopy": 0.5, "water_access": 0.25})
@@ -128,7 +137,7 @@ def test_model_parity_test_passes_and_fails(monkeypatch):
 
 
 @pytest.mark.parametrize("full", [False, True])
-def test_local_smoke_keeps_expensive_scoring_optional(monkeypatch, full):
+def test_local_smoke_keeps_expensive_scoring_optional(monkeypatch, full, baseline_check):
     monkeypatch.setattr(cli.run_v2, "ServicesClient", Mock(side_effect=AssertionError("local test must not contact Cloud Run")))
     response = Mock()
     response.json.return_value = {"h3_index": ["a"]}
@@ -142,7 +151,7 @@ def test_local_smoke_keeps_expensive_scoring_optional(monkeypatch, full):
     assert post.call_count == int(full)
 
 
-def test_private_api_smoke_uses_id_token(monkeypatch):
+def test_private_api_smoke_uses_id_token(monkeypatch, baseline_check):
     client = Mock()
     client.get_service.return_value.uri = "https://api.run.app"
     monkeypatch.setattr(cli.run_v2, "ServicesClient", Mock(return_value=client))
@@ -155,3 +164,39 @@ def test_private_api_smoke_uses_id_token(monkeypatch):
     cli.test_app("api")
     token.assert_called_once_with("https://api.run.app")
     assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer test-token"}
+
+
+@pytest.mark.parametrize("run_id,training_id,valid", [(cli.RUN_ID, cli.TRAINING_ID, True),
+    ("different-model", cli.TRAINING_ID, False), (cli.RUN_ID, "different-training-set", False)])
+def test_baseline_model_versions(monkeypatch, tmp_path, run_id, training_id, valid):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"model_run_id": cli.RUN_ID, "training_id": cli.TRAINING_ID}))
+    monkeypatch.setattr(cli, "BASELINE_MANIFEST", manifest)
+    monkeypatch.setattr(cli, "service_url", Mock(return_value=("http://model", {})))
+    get = Mock(return_value=Mock(json=Mock(return_value={"run_id": run_id, "training_id": training_id})))
+    monkeypatch.setattr(cli.requests, "get", get)
+    if valid:
+        cli.check_baseline_model(local=True)
+    else:
+        with pytest.raises(RuntimeError, match="baseline/model version mismatch"):
+            cli.check_baseline_model(local=True)
+    get.assert_called_once_with("http://model/health", headers={}, timeout=300)
+
+
+def test_missing_baseline_manifest_fails_before_network(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "BASELINE_MANIFEST", tmp_path / "missing.json")
+    get = Mock()
+    monkeypatch.setattr(cli.requests, "get", get)
+    with pytest.raises(RuntimeError, match="Cannot read routing baseline manifest"):
+        cli.check_baseline_model()
+    get.assert_not_called()
+
+
+def test_api_version_mismatch_prevents_deployment(monkeypatch):
+    client = Mock()
+    monkeypatch.setattr(cli.run_v2, "ServicesClient", Mock(return_value=client))
+    monkeypatch.setattr(cli, "check_baseline_model", Mock(side_effect=RuntimeError("baseline/model version mismatch")))
+    with pytest.raises(RuntimeError, match="version mismatch"):
+        cli.deploy("api")
+    client.update_service.assert_not_called()
+    client.create_service.assert_not_called()

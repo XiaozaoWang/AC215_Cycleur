@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Literal
 
 import numpy as np
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field
 from api import agent, baseline, model_client, road_graph, route_search
 from api.dimensions import DIMENSION_NAMES
 from api.schemas import DimensionWeight, Tile
+from api.logging import record_fields
 
 RouteKind = Literal["shortest", "efficient", "balanced", "preferred"]
 
@@ -175,8 +177,8 @@ def _run(request: RouteRequest, graph, prep, emit) -> RouteResponse:
         emit({"type": "start", "cells_total": len(prep.cells)})
         # The cells under the ellipse do not depend on the text, so the Model Service starts at once, in parallel with Gemini.
         with ThreadPoolExecutor(max_workers=2) as pool:
-            parsing = pool.submit(parse)
-            predicting = pool.submit(predict, prep.cell_ids(graph))
+            parsing = pool.submit(copy_context().run, parse)
+            predicting = pool.submit(copy_context().run, predict, prep.cell_ids(graph))
             parsed = parsing.result()
             predicting.result()
     lap("parse_and_predict")
@@ -225,6 +227,7 @@ def _run(request: RouteRequest, graph, prep, emit) -> RouteResponse:
     area_mean = {DIMENSION_NAMES[i]: round(float(reference[:, i].mean()), 4) for i in cared} if reference is not None else {}
     lap("response")
 
+    record_fields(cell_count=len(scores), route_count=len(routes), used_fallback=parsed.used_fallback if parsed else False)
     return RouteResponse(
         region_id=request.region_id, geometry=chosen.geometry, distance_m=chosen.distance_m, routes=routes,
         recommended=result.recommended, weights=[w for w in (preference.weights if preference else []) if w.weight != 0],
@@ -259,10 +262,11 @@ def stream(request: RouteRequest, graph, prep):
         try:
             events.put({"type": "result", **_run(request, graph, prep, events.put).model_dump()})
         except Exception as exc:  # reported to the client as an event because the HTTP status is already sent
+            record_fields(error_type=type(exc).__name__, stream_status_code=error_status(exc))
             events.put({"type": "error", "status": error_status(exc), "detail": str(exc) or exc.__class__.__name__})
         finally:
             events.put(None)
 
-    threading.Thread(target=work, daemon=True).start()
+    threading.Thread(target=copy_context().run, args=(work,), daemon=True).start()
     while (event := events.get()) is not None:
         yield json.dumps(event, separators=(",", ":")) + "\n"

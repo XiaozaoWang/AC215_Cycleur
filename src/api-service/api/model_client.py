@@ -2,6 +2,7 @@
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from threading import BoundedSemaphore
 from urllib.parse import urlsplit
 
@@ -11,6 +12,7 @@ from google.auth.transport.requests import Request
 from google.oauth2 import id_token
 
 from api.schemas import Tile, TileScore
+from api.logging import downstream_headers, log_event, record_fields, request_context
 
 MAX_BATCHES = 30          # one request is split into at most 30 batches
 MIN_BATCH_SIZE = 10       # but each batch has at least 10 cells: anything from 300 cells up still gets 30 batches (fastest),
@@ -57,10 +59,12 @@ def split_batches(tiles: list[Tile]) -> list[list[Tile]]:
 
 def post_with_retry(client: httpx.Client, url: str, body: dict) -> httpx.Response:
     # Retry 429/5xx after each wait in RETRY_WAITS; any other answer, or the last try, returns at once.
-    for wait in (*RETRY_WAITS, None):
+    for attempt, wait in enumerate((*RETRY_WAITS, None), 1):
         response = client.post(url, json=body)
         if response.status_code not in RETRY_STATUSES or wait is None:
             return response
+        log_event("model_service_retry", "Retrying Model Service request", severity="WARNING",
+                  status_code=response.status_code, attempt=attempt + 1, wait_seconds=wait)
         _sleep(wait)
 
 
@@ -81,6 +85,8 @@ def predict(tiles: list[Tile], on_batch=None) -> list[TileScore]:
     parts = split_batches(tiles)
     if not parts:
         return []
+    context = request_context.get() or {}
+    record_fields(model_batch_count=context.get("model_batch_count", 0) + len(parts))
     url = os.getenv("MODEL_SERVICE_URL", "").strip().rstrip("/")
     parsed = urlsplit(url)
     if (parsed.scheme not in {"http", "https"} or not parsed.netloc
@@ -88,7 +94,7 @@ def predict(tiles: list[Tile], on_batch=None) -> list[TileScore]:
         raise ModelServiceError("MODEL_SERVICE_URL must be the Model Service base URL")
 
     try:
-        with httpx.Client(timeout=REQUEST_TIMEOUT, headers=auth_headers(url)) as client:
+        with httpx.Client(timeout=REQUEST_TIMEOUT, headers={**auth_headers(url), **downstream_headers()}) as client:
             def call(part):
                 with _request_slots:
                     response = post_with_retry(client, f"{url}/predict", {"h3_indices": [t.h3_index for t in part]})
@@ -102,7 +108,7 @@ def predict(tiles: list[Tile], on_batch=None) -> list[TileScore]:
 
             # The result list follows submission order even when batches finish in a different order.
             with ThreadPoolExecutor(max_workers=min(len(parts), MAX_CONCURRENCY)) as pool:
-                futures = [pool.submit(call, part) for part in parts]
+                futures = [pool.submit(copy_context().run, call, part) for part in parts]
                 if on_batch:
                     for future in as_completed(futures):
                         on_batch(future.result())

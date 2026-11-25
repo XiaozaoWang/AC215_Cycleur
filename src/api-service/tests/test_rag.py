@@ -11,9 +11,11 @@ from google.auth.exceptions import DefaultCredentialsError
 
 from api import model_client
 from api.routers import rag
+from api.logging import RequestLoggingMiddleware
 
 app = FastAPI()
 app.include_router(rag.router)
+app.add_middleware(RequestLoggingMiddleware)
 client = TestClient(app)
 
 
@@ -29,15 +31,24 @@ def test_gateway_validation_prevents_upstream_calls():
     upstream.assert_not_called()
 
 
-def test_gateway_forwards_request_and_sources():
+@pytest.mark.parametrize("request_id", ["gateway-request", None])
+def test_gateway_forwards_request_and_sources(request_id, capsys):
     result = {"answer": "Check brakes.", "sources": [{"metadata": {"source_id": "GP-TEST"}}]}
     with patch.object(rag, "urlopen", return_value=io.BytesIO(json.dumps(result).encode())) as upstream:
-        response = client.post("/rag/chat", json={"question": " How? "})
+        response = client.post("/rag/chat", json={"question": " How? "},
+                               headers={"X-Request-ID": request_id} if request_id else {})
     assert response.json() == result
     request = upstream.call_args.args[0]
     assert request.full_url.endswith("/chat")
     assert json.loads(request.data) == {"question": "How?", "n_results": 5}
     assert upstream.call_args.kwargs["timeout"] == 50
+    actual_id = response.headers["X-Request-ID"]
+    assert actual_id and (request_id is None or actual_id == request_id)
+    assert request.get_header("X-request-id") == actual_id
+    output = capsys.readouterr().out
+    event = json.loads(output)
+    assert event["request_id"] == actual_id and event["status_code"] == 200
+    assert "How?" not in output and "Check brakes." not in output
 
 
 def test_gateway_handles_outage_timeout_bad_response_and_upstream_error():
