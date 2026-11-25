@@ -10,6 +10,7 @@ from google.auth.exceptions import DefaultCredentialsError
 from api import model_client
 from api.dimensions import DIMENSION_NAMES
 from api.schemas import Tile
+from api.logging import request_context
 
 
 def row(cell, status="ok"):
@@ -128,19 +129,29 @@ def test_on_batch_reports_every_batch_and_the_result_keeps_input_order(transport
     assert len(seen) == 30 and sum(len(batch) for batch in seen) == 70
 
 
-def test_cold_start_errors_are_retried_until_the_instance_is_up(transport, monkeypatch):
+def test_cold_start_errors_are_retried_until_the_instance_is_up(transport, monkeypatch, capsys):
     # 11-11: a cold Model Service answered some batches with 500 "aborted after waiting too long for an available
     # instance" and the whole scoring failed. Those answers are now retried with backoff.
     waits = []
     monkeypatch.setattr(model_client, "_sleep", waits.append)
     answers = iter([500, 429, 503, 200])
     def handler(request):
+        assert request.headers["X-Request-ID"] == "retry-request"
         status = next(answers)
         ids = json.loads(request.content)["h3_indices"]
         return httpx.Response(status, json={"results": [row(i) for i in ids]} if status == 200 else {})
     transport(handler)
-    assert model_client.predict([Tile(h3_index="a")])[0].status == "ok"
+    token = request_context.set({"request_id": "retry-request"})
+    try:
+        assert model_client.predict([Tile(h3_index="a")])[0].status == "ok"
+    finally:
+        request_context.reset(token)
     assert waits == [2.0, 4.0, 8.0]
+    logs = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [entry["attempt"] for entry in logs] == [2, 3, 4]
+    assert [entry["wait_seconds"] for entry in logs] == waits
+    assert all(entry["event"] == "model_service_retry" and entry["severity"] == "WARNING"
+               and entry["request_id"] == "retry-request" for entry in logs)
 
 
 def test_retries_stop_after_the_last_wait(transport, monkeypatch):
@@ -159,8 +170,9 @@ def test_retries_stop_after_the_last_wait(transport, monkeypatch):
     assert len(calls) == 9 and waits == [2, 4, 8, 15, 15, 15, 15, 15] and sum(waits) == 89
 
 
-def test_client_errors_are_not_retried(transport, monkeypatch):
+def test_client_errors_are_not_retried(transport, monkeypatch, capsys):
     monkeypatch.setattr(model_client, "_sleep", Mock(side_effect=AssertionError("must not wait")))
     transport(lambda request: httpx.Response(422))
     with pytest.raises(model_client.ModelServiceError):
         model_client.predict([Tile(h3_index="a")])
+    assert capsys.readouterr().out == ""

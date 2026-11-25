@@ -42,6 +42,11 @@ gs = lambda rel: f"gs://{BUCKET}/{rel}"                   # relative path in the
 now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
 
 
+def log_event(event, message, severity="INFO", **fields):
+    print(json.dumps({"severity": severity, "message": message, "service": "data-collector",
+                      "event": event, "request_id": None, "trace_id": None, **fields}), flush=True)
+
+
 # ==================== Status records ====================
 # Each step of each bbox has only three results: complete (done) / incomplete (not done because of a temporary problem like network, rerun it) / not needed (does not apply, e.g. no street view for suburbs)
 # "Data just isn't there" (nobody took photos, no NAIP coverage...) is not incomplete, it goes in each cell's tile_reason / street_reason
@@ -53,7 +58,7 @@ class Incomplete(Exception):
 def mark(area_id, step, status, reason="", **detail):
     STEPS.setdefault(area_id, {})[step] = {"status": status, **({"reason": reason} if reason else {}), **detail}
     if status == "incomplete":
-        print(f"!!! {area_id}: {step} NOT complete: {reason}")
+        log_event("collector_step_incomplete", "Collector step incomplete", severity="WARNING", area_id=area_id, step=step)
 
 def step_status(area_id, step):
     return STEPS.get(area_id, {}).get(step, {}).get("status")
@@ -84,7 +89,7 @@ def tick(step):
     global T_LAST
     TIMES[step] = (time.time() - T_LAST) / 60
     T_LAST = time.time()
-    print(f"⏱ {step}: {TIMES[step]:.1f} min (total {(T_LAST - T0) / 60:.1f} min)")
+    log_event("collector_progress", f"⏱ {step}: {TIMES[step]:.1f} min (total {(T_LAST - T0) / 60:.1f} min)")
 
 
 # ==================== 1. Config + connect to bucket ====================
@@ -136,11 +141,11 @@ def setup(args):
             manifest["config"] = CONFIG
             with fs.open(gs(rel), "w") as f:
                 json.dump(manifest, f, indent=2)
-        print(f"Dataset {DS} exists with the same config: reusing what is already there.")
+        log_event("collector_progress", f"Dataset {DS} exists with the same config: reusing what is already there.")
     else:
         with fs.open(gs(rel), "w") as f:
             json.dump({"dataset_id": cfg["dataset_id"], "created_at": now(), "status": "running", "config": CONFIG}, f, indent=2)
-        print(f"Created gs://{BUCKET}/{DS}/")
+        log_event("collector_progress", f"Created gs://{BUCKET}/{DS}/")
 
 
 # ==================== 2. Cells (with dedup) ====================
@@ -164,11 +169,11 @@ def make_cells():
         g = grids[a["area_id"]]
         mine = g.h3_index.map(owner) == a["area_id"]
         if (~mine).any():
-            print(f"{a['area_id']}: {(~mine).sum()} cells also in another bbox, kept there")
+            log_event("collector_progress", f"{a['area_id']}: {(~mine).sum()} cells also in another bbox, kept there")
         parts.append(g[mine].assign(area_id=a["area_id"], area_type=a["area_type"], area_subtype=a["area_subtype"]))
     cells = pd.concat(parts, ignore_index=True)
     cells.insert(0, "cell_id", cells.area_id + "_" + cells.h3_index)    # so you can see at a glance which bbox a cell belongs to
-    print(cells.groupby(["area_id", "area_type", "area_subtype"]).size().rename("cells").to_string())
+    log_event("collector_progress", cells.groupby(["area_id", "area_type", "area_subtype"]).size().rename("cells").to_string())
     return cells
 
 
@@ -209,7 +214,7 @@ def find_naip(cells):
             cells.loc[area.index, "naip_date"] = [str(it.datetime.date()) if it else None for it in picked]
             items |= {it.id: it for it in picked if it}
             near[a["area_id"]] = [it for _, it in naip]
-            print(f"{a['area_id']}: {len(naip)} NAIP images, years {sorted({year_of(it) for _, it in naip})}, "
+            log_event("collector_progress", f"{a['area_id']}: {len(naip)} NAIP images, years {sorted({year_of(it) for _, it in naip})}, "
                   f"{sum(it is None for it in picked)} cells without NAIP coverage")
         except Exception as e:
             mark(a["area_id"], "naip", "incomplete", f"NAIP search failed: {why(e)}")
@@ -302,7 +307,7 @@ def crop_tiles(cells, items, near):
                     n_new += len(todo)
             n_mosaic = patch_seams(cells, area, near[aid])
             mark(aid, "naip", "complete", tiles_new=n_new, tiles_mosaic=n_mosaic)
-            print(f"{aid}: {len(area)} tiles ({n_new} newly cropped, {n_mosaic} seams patched)")
+            log_event("collector_progress", f"{aid}: {len(area)} tiles ({n_new} newly cropped, {n_mosaic} seams patched)")
         except Exception as e:
             mark(aid, "naip", "incomplete", f"aerial tiles: {why(e)}")   # tiles already cropped stay in the cache, a rerun won't crop them again
 
@@ -311,7 +316,7 @@ def crop_tiles(cells, items, near):
     cells["tile_reason"] = np.where(cells.tile_ok, np.where(cells.naip_mosaic.notna(), "ok_mosaic", "ok"),
                                     np.where(cells.naip_item.isna(), "no_naip_coverage", "mostly_black"))
     cells.loc[cells.area_id.map(lambda i: step_status(i, "naip") != "complete"), "tile_reason"] = None   # left empty for bboxes that are not done
-    print(f"{int(cells.tile_ok.sum())} / {len(cells)} usable aerial tiles")
+    log_event("collector_progress", f"{int(cells.tile_ok.sum())} / {len(cells)} usable aerial tiles")
 
 
 # ==================== 4. Street view (Mapillary, city bboxes only) ====================
@@ -577,12 +582,12 @@ def street_view(cells):
                     sv_list.append(pd.read_parquet(gs(rel)))
                     street_reason |= dict(zip(old.cell_id, old.street_reason))
                     mark(aid, "street_view", "complete")
-                    print(f"{aid}: already done")
+                    log_event("collector_progress", f"{aid}: already done")
                     continue
             df, funnels[aid] = filter_photos(load_metadata(a["bbox"]), a["bbox"])
-            print(f"\n{aid}: filter funnel")
+            log_event("collector_progress", f"\n{aid}: filter funnel")
             for name, n in funnels[aid]:
-                print(f"  {name:<28}{n:>10,}")
+                log_event("collector_progress", f"  {name:<28}{n:>10,}")
             df = df[df.h3_index.isin(area.h3_index)]      # only this bbox's cells (cells given to another bbox by dedup are dropped too)
             naip_of = area.set_index("h3_index").naip_date
             df, sfm_failed = add_heading(shortlist(add_travel(df), naip_of))
@@ -625,13 +630,13 @@ def street_view(cells):
                 street_reason[c] = ("has_photos" if c in has else "photos_deleted" if h in lost
                                     else "too_few_photos" if h in groups else "no_photos")
             mark(aid, "street_view", "complete", photos=len(p), photos_deleted_on_mapillary=len(gone))
-            print(f"  {p.cell_id.nunique()} of {len(area)} cells have street photos ({len(p)} photos)")
+            log_event("collector_progress", f"  {p.cell_id.nunique()} of {len(area)} cells have street photos ({len(p)} photos)")
         except Exception as e:                            # this bbox failed: mark incomplete (details of failed photos go into the status file), go on to the next
             mark(aid, "street_view", "incomplete", why(e), **({"failed": e.args[1]} if isinstance(e, Incomplete) and len(e.args) > 1 else {}))
 
     sv = pd.concat(sv_list, ignore_index=True) if sv_list else pd.DataFrame(columns=SV_COLS)
     cells["street_reason"] = cells.cell_id.map(street_reason)   # left empty for city bboxes that are not done
-    print(f"\nStreet photos: {len(sv)} in {sv.cell_id.nunique()} cells")
+    log_event("collector_progress", f"\nStreet photos: {len(sv)} in {sv.cell_id.nunique()} cells")
     return sv, funnels
 
 
@@ -657,11 +662,11 @@ def get_pbf(url):
     if os.path.exists(local):
         return local
     if fs.exists(gs(f"cache/osm/{name}")):
-        print(f"Copying {name} from GCS ...")
+        log_event("collector_progress", f"Copying {name} from GCS ...")
         fs.get(gs(f"cache/osm/{name}"), local + ".part")
         os.replace(local + ".part", local)
         return local
-    print(f"Downloading {url} (a few hundred MB, only once) ...")
+    log_event("collector_progress", f"Downloading {url} (a few hundred MB, only once) ...")
     with requests.get(url, stream=True, timeout=120) as r:
         r.raise_for_status()
         last_modified = r.headers.get("last-modified")
@@ -727,7 +732,7 @@ def osm_features_for(area_cells, pbf_url):
     pois = osm.get_pois(custom_filter={"amenity": True, "shop": True, "tourism": True})
     pois = pois[["geometry"]].to_crs(utm).reset_index(drop=True) if pois is not None and len(pois) else gpd.GeoDataFrame(geometry=[], crs=utm)
     pois["geometry"] = pois.geometry.representative_point()         # area POIs (like a mall) only count once
-    print(f"  OSM: {len(edges):,} road segments, {len(junctions):,} intersections, {len(buildings):,} buildings, {len(pois):,} POIs")
+    log_event("collector_progress", f"  OSM: {len(edges):,} road segments, {len(junctions):,} intersections, {len(buildings):,} buildings, {len(pois):,} POIs")
 
     rows = []
     for cid, fp in tqdm(list(zip(area_cells.cell_id, foot)), desc="cells"):
@@ -776,7 +781,7 @@ def url_exists(url):
         except requests.RequestException:
             pass
         time.sleep(15 * (k + 1))
-    print(f"  Geofabrik did not answer for {url.rsplit('/', 1)[-1]}: trying an older year")
+    log_event("osm_snapshot_retry", "OSM snapshot unavailable; trying an older year", severity="WARNING")
     return None
 
 def osm_snapshot_url(latest_url, naip_day):
@@ -830,7 +835,7 @@ def map_features(cells):
                     raise Incomplete("no OSM snapshot could be found, or Geofabrik did not answer")
                 parts = []
                 for url, group in cells.loc[area.index].groupby("osm_url"):     # usually one bbox uses only one snapshot
-                    print(f"{aid}: {len(group)} cells use {url.rsplit('/', 1)[-1]}")
+                    log_event("collector_progress", f"{aid}: {len(group)} cells use {url.rsplit('/', 1)[-1]}")
                     parts.append(osm_features_for(group.reset_index(drop=True), url))
                 f = pd.concat(parts, ignore_index=True)
                 f.insert(1, "h3_index", f.cell_id.map(cells.set_index("cell_id").h3_index))
@@ -841,9 +846,9 @@ def map_features(cells):
             mark(aid, "osm", "incomplete", why(e))
 
     feats = pd.concat(feat_list, ignore_index=True) if feat_list else pd.DataFrame(columns=["cell_id", "h3_index"])
-    print(f"{len(feats)} cells, {feats.shape[1] - 2} feature columns")
+    log_event("collector_progress", f"{len(feats)} cells, {feats.shape[1] - 2} feature columns")
     if len(feats):
-        print(feats.describe().T[["mean", "min", "50%", "max"]].round(2).to_string())
+        log_event("collector_progress", feats.describe().T[["mean", "min", "50%", "max"]].round(2).to_string())
 
 
 # ==================== 6. Save + summary ====================
@@ -913,24 +918,24 @@ def save(cells, sv, funnels):
     with fs.open(gs(f"{DS}/manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
 
-    print(f"\nDataset written to gs://{BUCKET}/{DS}/")
+    log_event("collector_progress", f"\nDataset written to gs://{BUCKET}/{DS}/")
     fs.invalidate_cache()
     for sub in ["cells", "osm_features", "streetview", "status"]:
-        print(f"  {sub + '/':<16}{len(fs.find(f'{BUCKET}/{DS}/{sub}')):>6} files")
-    print("\n" + areas.drop(columns=["bbox"]).to_string(index=False))
+        log_event("collector_progress", f"  {sub + '/':<16}{len(fs.find(f'{BUCKET}/{DS}/{sub}')):>6} files")
+    log_event("collector_progress", "\n" + areas.drop(columns=["bbox", "incomplete_reason"], errors="ignore").to_string(index=False))
 
     # incomplete list: bboxes not done because of network etc., with reasons and rerun args you can copy
     bad = areas[areas.status == "incomplete"]
     if len(bad):
-        print(f"\n!!! {len(bad)} bbox(es) NOT complete (rerun them; finished parts are not redone):")
+        log_event("collector_progress", f"\n!!! {len(bad)} bbox(es) NOT complete (rerun them; finished parts are not redone):")
         for r in bad.itertuples():
-            print(f"    {r.area_id:<28} {r.incomplete_reason}")
-        print(f"Rerun these (only your own): --areas {' '.join(bad.area_id)}")
+            log_event("collector_area_incomplete", "Collector area incomplete", severity="WARNING", area_id=r.area_id)
+        log_event("collector_progress", f"Rerun these (only your own): --areas {' '.join(bad.area_id)}")
     else:
-        print("\nNo incomplete bboxes.")
+        log_event("collector_progress", "\nNo incomplete bboxes.")
     waiting = areas.area_id[areas.status == "not run yet"].tolist()
     if waiting:
-        print(f"Not run yet (maybe a teammate's): {waiting}")
+        log_event("collector_progress", f"Not run yet (maybe a teammate's): {waiting}")
 
 
 # ==================== 7. QC figures (saved to local qc/ and {DS}/qc/ in the bucket) ====================
@@ -975,7 +980,7 @@ def qc(cells, sv):
     save_fig("areas.png")
 
     if sv.empty:
-        print("No street photos: map skipped.")
+        log_event("collector_progress", "No street photos: map skipped.")
     else:
         # photos.png: photos from two random cells that have street view
         show = sv.cell_id.drop_duplicates().sample(n=min(2, sv.cell_id.nunique()), random_state=0)
@@ -991,7 +996,7 @@ def qc(cells, sv):
 
     for name in os.listdir(QC_DIR):
         fs.put(f"{QC_DIR}/{name}", gs(f"{DS}/{QC_DIR}/{name}"))
-    print(f"QC files: local {QC_DIR}/ and gs://{BUCKET}/{DS}/{QC_DIR}/")
+    log_event("collector_progress", f"QC files: local {QC_DIR}/ and gs://{BUCKET}/{DS}/{QC_DIR}/")
 
 def street_map(cells, sv):
     # map.html interactive map: basemap + bbox borders + all cells (filled = has street view) + filtered photo points (color = year) + camera direction of picked photos
@@ -1024,7 +1029,7 @@ def street_map(cells, sv):
     dy = (sv.h3_index.map(lambda h: centre[h][0]) - sv.lat) * m_lat
     off = np.abs((sv.compass - np.degrees(np.arctan2(dx, dy)) % 360 + 180) % 360 - 180)
     away = (off > 90) & (np.hypot(dx, dy) >= 15)          # within 15 m of the centre, any direction counts as facing in
-    print(f"{int(away.sum())} of {len(sv)} selected photos ({away.mean():.0%}) point away from their cell centre "
+    log_event("collector_progress", f"{int(away.sum())} of {len(sv)} selected photos ({away.mean():.0%}) point away from their cell centre "
           f"(random directions would give about 50%)")
 
     m = folium.Map(tiles=None, prefer_canvas=True)        # canvas can draw 10k+ shapes without lag
@@ -1109,7 +1114,7 @@ def street_map(cells, sv):
                 + "</div></div>")
         folium.Polygon([list(q) for q in h3.cell_to_boundary(r.h3_index)], color="#ff6a00", weight=3, fill=True, fill_color="#ffd400", fill_opacity=0.6,
                        tooltip=f"{r.cell_id} · 点开看图", popup=folium.Popup(body, max_width=860)).add_to(smp)
-    print(f"Sample cells with pictures: {len(samples)} in {samples.area_id.nunique()} city bboxes")
+    log_event("collector_progress", f"Sample cells with pictures: {len(samples)} in {samples.area_id.nunique()} city bboxes")
 
     # dropdown in the top left: pick a bbox and the view jumps there
     bounds = {a["area_id"]: corners(a["bbox"]) for a in RUN}
@@ -1130,7 +1135,7 @@ def street_map(cells, sv):
     b = np.array([a["bbox"] for a in RUN])
     m.fit_bounds(corners((b[:, 0].min(), b[:, 1].min(), b[:, 2].max(), b[:, 3].max())))
     m.save(f"{QC_DIR}/map.html")
-    print(f"Map saved: {QC_DIR}/map.html ({os.path.getsize(f'{QC_DIR}/map.html') / 1e6:.1f} MB). Open it in Chrome / Safari.")
+    log_event("collector_progress", f"Map saved: {QC_DIR}/map.html ({os.path.getsize(f'{QC_DIR}/map.html') / 1e6:.1f} MB). Open it in Chrome / Safari.")
 
 
 # ==================== Entry point ====================
@@ -1155,8 +1160,14 @@ def main():
     save(cells, sv, funnels);               tick("save")
     if not args.no_qc:
         qc(cells, sv);                      tick("qc")
-    print("\nTime per step (minutes):", ", ".join(f"{k} {v:.1f}" for k, v in TIMES.items()), f"| total {(time.time() - T0) / 60:.1f}")
+    log_event("collector_completed", "Data collection completed", dataset_id=DS.split("/")[-1], area_count=len(RUN),
+              cell_count=len(cells), streetview_image_count=len(sv), satellite_tile_count=int(cells.tile_ok.sum()),
+              elapsed_seconds=round(time.time() - T0, 2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        log_event("collector_failed", "Data collection failed", severity="ERROR", error_type=type(error).__name__)
+        raise SystemExit(1) from None

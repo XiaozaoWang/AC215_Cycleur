@@ -44,6 +44,11 @@ def model_training(
             package_uris=[f"gs://{bucket_name}/trainer/greenpath-trainer.tar.gz"],
             python_module="trainer.task",
             args=args,
+            # Only resource identifiers go into the job spec; the trainer retrieves the key.
+            env=[
+                v1.EnvVar(name="GOOGLE_CLOUD_PROJECT", value=project),
+                v1.EnvVar(name="WANDB_SECRET_ID", value="wandb-api-key"),
+            ],
         ),
     )
     client = v1.JobServiceClient(client_options={"api_endpoint": f"{location}-aiplatform.googleapis.com"})

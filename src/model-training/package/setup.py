@@ -2,7 +2,7 @@ from setuptools import find_packages, setup
 
 # Vertex AI installs the dependencies from here first after the machine starts, then runs python -m trainer.task
 # The GPU image (pytorch-gpu) already has torch; the CPU image (sklearn-cpu) doesn't, so pip installs it on the spot (startup is a few minutes slower)
-REQUIRED_PACKAGES = ["torch", "timm", "gcsfs", "pyarrow", "wandb", "pillow"]
+REQUIRED_PACKAGES = ["torch", "timm", "gcsfs", "pyarrow", "wandb", "pillow", "google-cloud-secret-manager"]
 
 setup(
     name="greenpath-trainer",

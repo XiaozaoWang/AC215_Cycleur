@@ -3,6 +3,7 @@
 from pydantic import ValidationError
 from api import llm, prompts
 from api.schemas import AgentResult, Attempt, Preference
+from api.logging import log_event
 
 # Max number of times to ask
 MAX_ATTEMPTS = 3
@@ -21,11 +22,9 @@ def get_preference(text: str, ask=llm.ask) -> AgentResult:
             raw = ask(user_prompt, prompts.SYSTEM_INSTRUCTION, Preference)
         except Exception as e:
             attempts.append(Attempt(prompt=user_prompt, raw="", error=f"LLM call failed: {e}"))
-            print(f"[agent] attempt {attempt}/{MAX_ATTEMPTS} LLM call failed: {e}")
+            log_event("preference_call_failed", "Preference generation call failed", severity="WARNING",
+                      attempt=attempt, error_type=type(e).__name__)
             continue
-
-        # Trace, log every ask and answer
-        print(f"[agent] attempt {attempt}/{MAX_ATTEMPTS} raw={raw!r}")
 
         # Verification: pydantic checks it, if valid return right away, if not save the error and send it back next round
         try:
@@ -35,8 +34,9 @@ def get_preference(text: str, ask=llm.ask) -> AgentResult:
         except ValidationError as e:
             error = str(e)
             attempts.append(Attempt(prompt=user_prompt, raw=raw, error=error))
-            print(f"[agent] rejected: {error}")
+            log_event("preference_validation_failed", "Preference response validation failed",
+                      severity="WARNING", attempt=attempt, error_type=type(e).__name__)
 
     # Fallback: out of attempts, return all 0 weights
-    print("[agent] budget used up, using fallback (all weights 0)")
+    log_event("preference_fallback", "Preference attempts exhausted; using fallback", severity="WARNING")
     return AgentResult(preference=Preference(), attempts=attempts, used_fallback=True)

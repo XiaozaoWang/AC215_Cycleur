@@ -19,6 +19,7 @@ import yaml
 from google import genai
 from google.auth.transport.requests import AuthorizedSession
 from google.genai import types, errors
+from rag.logging import log_event
 from langchain_text_splitters import CharacterTextSplitter, RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
 
 from rag.settings import (
@@ -133,7 +134,7 @@ def checked_manifest(method, embedded=False, *, input_folder=None, output_folder
 
 
 def chunk(method):
-    print("chunk()")
+    log_event("chunking_started", "Document chunking started")
     Path(OUTPUT_FOLDER).mkdir(parents=True, exist_ok=True)
     files = sorted(Path(INPUT_FOLDER).rglob("*.md"))
     if not files:
@@ -164,7 +165,7 @@ def chunk(method):
         manifest["inputs"][str(path.relative_to(INPUT_FOLDER))] = digest(path)
         manifest["chunks"][filename] = digest(target)
         lengths.extend(len(r["chunk"]) for r in rows)
-        print(f"{meta['source_id']}: {len(body)} chars -> {len(rows)} chunks")
+        log_event("document_chunked", "Document chunked", source_id=meta["source_id"], character_count=len(body), chunk_count=len(rows))
     if not lengths:
         raise ValueError("All input documents are empty")
     manifest["total_chunks"] = len(lengths)
@@ -172,8 +173,8 @@ def chunk(method):
     manifest["length_max"] = max(lengths)
     manifest["length_mean"] = round(sum(lengths) / len(lengths), 1)
     save_manifest(method, manifest)
-    print(f"[{method}] {len(files)} files, {len(lengths)} chunks; "
-          f"length min/mean/max: {min(lengths)}/{manifest['length_mean']}/{max(lengths)}")
+    log_event("chunking_completed", "Document chunking completed", chunk_type=method,
+              file_count=len(files), chunk_count=len(lengths))
 
 
 def embedding_text(row):
@@ -181,7 +182,7 @@ def embedding_text(row):
 
 
 def embed(method):
-    print("embed()")
+    log_event("embedding_started", "Document embedding started")
     manifest = checked_manifest(method)
     manifest.pop("embeddings", None)
     save_manifest(method, manifest)  # if it stops halfway, --load can't pick up the previous round's results
@@ -194,14 +195,14 @@ def embed(method):
         target = Path(OUTPUT_FOLDER) / filename.replace("chunks-", "embeddings-", 1)
         write_jsonl(target, rows)
         hashes[target.name] = digest(target)
-        print(f"{target.name}: {len(rows)} embeddings")
+        log_event("document_embedded", "Document embedded", embedding_count=len(rows))
     manifest.update(embeddings=hashes, embedding_model=EMBEDDING_MODEL,
                     embedding_dimension=EMBEDDING_DIMENSION)
     save_manifest(method, manifest)
 
 def load(method, replace=False, client=None, *, input_folder=None, output_folder=None):
     output_folder = OUTPUT_FOLDER if output_folder is None else output_folder
-    print("load()")
+    log_event("index_loading_started", "Index loading started")
     manifest = checked_manifest(method, embedded=True, input_folder=input_folder, output_folder=output_folder)
     rows = [r for name in manifest["embeddings"] for r in read_jsonl(Path(output_folder) / safe_relative(name))]
     if not rows or len({r["chunk_id"] for r in rows}) != len(rows):
@@ -236,7 +237,7 @@ def load(method, replace=False, client=None, *, input_folder=None, output_folder
                 embeddings=[r["embedding"] for r in batch],
                 metadatas=[{k: v for k, v in r.items() if k not in ("chunk", "embedding", "chunk_id")} for r in batch],
             )
-        print(f"Upserted {len(rows)} chunks into '{name}'; collection count={collection.count()}")
+        log_event("index_loaded", "Index loaded", collection=name, chunk_count=collection.count(), upsert_count=len(rows))
     finally:
         if owned:
             client.close()
@@ -291,7 +292,8 @@ def generate_embeddings(texts, task_type, max_retries=5, retry_delay=2, *, clien
                 if e.code not in (429, 500, 502, 503, 504) or attempt == max_retries:
                     raise
                 wait = retry_delay * 2 ** attempt
-                print(f"API error ({e.code}). Retrying in {wait}s ...")
+                log_event("embedding_retry", "Retrying embedding request", severity="WARNING",
+                          status_code=e.code, attempt=attempt + 2, wait_seconds=wait)
                 time.sleep(wait)
     return embeddings
 
@@ -345,9 +347,8 @@ def restore_index(archive, release_dir, database_dir, expected_count):
         count = client.get_collection("greenpath-docs-markdown-split").count()
         if count != expected_count:
             raise ValueError("Restored database count does not match the index release")
-        print(json.dumps({"severity": "INFO", "message": "index_restored", "count": count,
-                          "embedding_model": EMBEDDING_MODEL,
-                          "dimension": EMBEDDING_DIMENSION}), flush=True)
+        log_event("index_restored", "Index restored", chunk_count=count, embedding_model=EMBEDDING_MODEL,
+                  dimension=EMBEDDING_DIMENSION)
     finally:
         client.close()
     return count

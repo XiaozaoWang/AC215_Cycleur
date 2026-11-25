@@ -44,6 +44,11 @@ now = lambda: datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="s
 cost_usd = lambda tin, tout: tin / 1e6 * PRICE_IN_PER_M + tout / 1e6 * PRICE_OUT_PER_M
 
 
+def log_event(event, message, severity="INFO", **fields):
+    print(json.dumps({"severity": severity, "message": message, "service": "data-labeler",
+                      "event": event, "request_id": None, "trace_id": None, **fields}), flush=True)
+
+
 # ==================== Status records ====================
 # Aerial / street for each bbox has only two results: complete (all scored) / incomplete (not finished because of a temporary problem like rate limit, busy server, network, rerun it)
 # Problems with the image itself (Gemini says unusable, broken image) are not incomplete, they go in each image's unusable_reason
@@ -52,7 +57,7 @@ STEPS = {}                                                # {area_id: {"aerial" 
 def mark(area_id, step, status, reason=""):
     STEPS.setdefault(area_id, {})[step] = {"status": status, **({"reason": reason} if reason else {})}
     if status == "incomplete":
-        print(f"!!! {area_id}: {step} NOT complete: {reason}")
+        log_event("labeler_step_incomplete", "Labeler step incomplete", severity="WARNING", area_id=area_id, step=step)
 
 def step_status(area_id, step):
     return STEPS.get(area_id, {}).get(step, {}).get("status")
@@ -85,7 +90,7 @@ def tick(step):
     global T_LAST
     TIMES[step] = (time.time() - T_LAST) / 60
     T_LAST = time.time()
-    print(f"⏱ {step}: {TIMES[step]:.1f} min (total {(T_LAST - T0) / 60:.1f} min)")
+    log_event("labeler_progress", f"⏱ {step}: {TIMES[step]:.1f} min (total {(T_LAST - T0) / 60:.1f} min)")
 
 
 # ==================== 1. Load dataset ====================
@@ -135,7 +140,7 @@ def setup(args):
     assert cells is not None, "no cells yet: run data-collector for these bboxes first"
     skipped = [a["area_id"] for a in RUN if a["area_id"] not in set(cells.area_id)]
     if skipped:
-        print("not processed by data-collector yet, skipped:", skipped)
+        log_event("labeler_areas_skipped", "Skipping areas not yet collected", severity="WARNING", area_count=len(skipped))
     RUN = [a for a in RUN if a["area_id"] in set(cells.area_id)]
     sv = read_areas("streetview", [a["area_id"] for a in RUN])
     if sv is None:
@@ -146,8 +151,8 @@ def setup(args):
     project = os.environ.get("GOOGLE_CLOUD_PROJECT") or google.auth.default()[1]
     LOCATION = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
     client = genai.Client(vertexai=True, project=project, location=LOCATION)
-    print(f"Dataset {args.dataset}: {len(RUN)} bboxes, {len(cells)} cells, {len(sv)} street photos | {MODEL} in {project} / {LOCATION}")
-    print(progress().to_string())
+    log_event("labeler_progress", f"Dataset {args.dataset}: {len(RUN)} bboxes, {len(cells)} cells, {len(sv)} street photos | {MODEL} in {project} / {LOCATION}")
+    log_event("labeler_progress", progress().to_string())
 
 
 # ==================== 2. Load scoring rules (prompt) ====================
@@ -175,7 +180,7 @@ def load_prompt(version, label_dir):
     else:
         with fs.open(gs(copy_rel), "wb") as f:
             f.write(text.encode("utf-8"))
-    print(f"Prompt {version} (sha {hashlib.sha256(text.encode()).hexdigest()[:12]}): {len(DIMS)} dimensions, all found")
+    log_event("labeler_progress", f"Prompt {version} (sha {hashlib.sha256(text.encode()).hexdigest()[:12]}): {len(DIMS)} dimensions, all found")
     return text
 
 
@@ -237,7 +242,7 @@ def score_all(todo, key, path_col, prompt, min_score, out_rel):
     todo = todo[~todo[key].isin(done[key])]
     if MAX_IMAGES:
         todo = todo.head(MAX_IMAGES)
-    print(f"  {len(done)} already scored; {len(todo)} to score now")
+    log_event("labeler_progress", f"  {len(done)} already scored; {len(todo)} to score now")
     rows, errors, abort, fatal = [], {}, threading.Event(), None
     def save():
         nonlocal done
@@ -266,7 +271,7 @@ def score_all(todo, key, path_col, prompt, min_score, out_rel):
     if fatal:
         raise fatal
     if errors:
-        print(f"  {len(errors)} failed in this run, e.g.", list(errors.items())[:2])
+        log_event("image_labeling_failed", "Some images could not be labeled", severity="WARNING", failure_count=len(errors))
     return done, errors
 
 
@@ -278,7 +283,7 @@ def label_aerial(prompt):
     tile_list, aer_list = [], []
     for a in RUN:
         tiles = cells[(cells.area_id == a["area_id"]) & cells.tile_ok]
-        print(f"{a['area_id']}: {len(tiles)} aerial tiles")
+        log_event("labeler_progress", f"{a['area_id']}: {len(tiles)} aerial tiles")
         raw, errors = score_all(tiles, "cell_id", "tile_path", prompt, 0, f"{aer_dir}/tile_labels/{a['area_id']}.parquet")
         if not check_done(a["area_id"], "aerial", tiles.cell_id, raw.cell_id, errors) or raw.empty:
             continue                                      # not finished: don't save cell scores yet (save after a rerun fills the gaps)
@@ -294,7 +299,7 @@ def label_aerial(prompt):
         tile_list.append(raw); aer_list.append(lab)
     tile_scores = pd.concat(tile_list, ignore_index=True) if tile_list else pd.DataFrame(columns=["cell_id", "usable", *DIMS])
     aerial_labels = pd.concat(aer_list, ignore_index=True) if aer_list else pd.DataFrame(columns=["cell_id", "h3_index", *DIMS, "rationale"])
-    print(f"\n{len(aerial_labels)} cells with aerial scores")
+    log_event("labeler_progress", f"\n{len(aerial_labels)} cells with aerial scores")
     return tile_scores, aerial_labels
 
 
@@ -307,7 +312,7 @@ def label_street(prompt):
         photos = sv[sv.area_id == a["area_id"]]
         if photos.empty:
             continue
-        print(f"{a['area_id']}: {len(photos)} street photos")
+        log_event("labeler_progress", f"{a['area_id']}: {len(photos)} street photos")
         raw, errors = score_all(photos, "image_id", "image_path", prompt, 1, f"{st_dir}/image_labels/{a['area_id']}.parquet")
         check_done(a["area_id"], "street", photos.image_id, raw.image_id, errors)
         img_list.append(raw[raw.image_id.isin(photos.image_id)])
@@ -334,7 +339,7 @@ def label_street(prompt):
             part.drop(columns="area_id").assign(updated_at=now()).to_parquet(gs(f"{st_dir}/cell_labels/{area_id}.parquet"), index=False)
 
     tin, tout = int(mine.input_tokens.sum()) if len(mine) else 0, int(mine.output_tokens.sum()) if len(mine) else 0
-    print(f"\n{len(mine)} photos scored ({int(mine.usable.sum())} usable); {len(labels)} cells, {int(enough.sum())} have street labels; about ${cost_usd(tin, tout):.3f}")
+    log_event("labeler_progress", f"\n{len(mine)} photos scored ({int(mine.usable.sum())} usable); {len(labels)} cells, {int(enough.sum())} have street labels; about ${cost_usd(tin, tout):.3f}")
     return mine, labels
 
 
@@ -355,23 +360,23 @@ def summary():
                 "est_cost_usd": round(cost_usd(tin, tout), 4), "updated_at": now()}
         with fs.open(gs(f"{DS}/labels/{label_id}/meta.json"), "w") as f:
             json.dump(meta, f, indent=2)
-        print(f"{label_id}: {meta['bboxes']} bboxes, {meta['images_scored']} images scored, estimated cost ${meta['est_cost_usd']}")
+        log_event("labeler_progress", f"{label_id}: {meta['bboxes']} bboxes, {meta['images_scored']} images scored, estimated cost ${meta['est_cost_usd']}")
 
     # incomplete list: scored images < images to score means not finished (no matter who ran it), with reasons and rerun args you can copy
     prog, bad = progress(), {}
-    print("\n" + prog.to_string())
+    log_event("labeler_progress", "\n" + prog.to_string())
     for area_id, r in prog.iterrows():
         for step, got, want in [("aerial", r.aerial_scored, r.tiles_ok), ("street", r.street_scored, r.street_photos)]:
             if got < want or step_status(area_id, step) == "incomplete":
                 reason = STEPS.get(area_id, {}).get(step, {}).get("reason", f"{want - got} of {want} images not scored yet")
                 bad.setdefault(area_id, []).append(f"{step}: {reason}")
     if bad:
-        print(f"\n!!! {len(bad)} bbox(es) NOT fully scored (rerun them; scored images are not redone or paid again):")
-        for area_id, reasons in bad.items():
-            print(f"    {area_id:<28} {'; '.join(reasons)}")
-        print(f"Rerun these (only your own): --areas {' '.join(bad)}")
+        log_event("labeler_progress", f"\n!!! {len(bad)} bbox(es) NOT fully scored (rerun them; scored images are not redone or paid again):")
+        for area_id in bad:
+            log_event("labeler_area_incomplete", "Labeler area incomplete", severity="WARNING", area_id=area_id)
+        log_event("labeler_progress", f"Rerun these (only your own): --areas {' '.join(bad)}")
     else:
-        print("\nNo incomplete bboxes.")
+        log_event("labeler_progress", "\nNo incomplete bboxes.")
 
 
 # ==================== 7. QC figures (saved to local qc/ and {DS}/qc/ in the bucket) ====================
@@ -432,7 +437,7 @@ def qc(tile_scores, aerial_labels, mine, labels):
                      "aerial can't judge %": (a == 0).mean() * 100})
     axes[0, 0].legend(fontsize=7)
     save_fig("spread.png")
-    print(pd.DataFrame(rows).set_index("dimension").round(2).to_string())
+    log_event("labeler_progress", pd.DataFrame(rows).set_index("dimension").round(2).to_string())
 
     # photos.png: 4 random street photos with their scores (only dimensions above 1), to check the scores match the pictures
     look = ok.sample(n=min(4, len(ok)), random_state=42).merge(sv[["image_id", "image_path"]], on="image_id")
@@ -449,7 +454,7 @@ def qc(tile_scores, aerial_labels, mine, labels):
 
     for name in os.listdir(QC_DIR):
         fs.put(f"{QC_DIR}/{name}", gs(f"{DS}/{QC_DIR}/{name}"))
-    print(f"QC files: local {QC_DIR}/ and gs://{BUCKET}/{DS}/{QC_DIR}/")
+    log_event("labeler_progress", f"QC files: local {QC_DIR}/ and gs://{BUCKET}/{DS}/{QC_DIR}/")
 
 def label_map(aerial_labels, mine, labels):
     # label_map.html interactive map: all cells colored by one dimension, click a cell to see its street and aerial scores on the right
@@ -579,7 +584,7 @@ def label_map(aerial_labels, mine, labels):
     folium.LayerControl(collapsed=False).add_to(m)
     m.fit_bounds(bounds[RUN[0]["area_id"]])
     m.save(f"{QC_DIR}/label_map.html")
-    print(f"Map saved: {QC_DIR}/label_map.html ({os.path.getsize(f'{QC_DIR}/label_map.html') / 1e6:.1f} MB), "
+    log_event("labeler_progress", f"Map saved: {QC_DIR}/label_map.html ({os.path.getsize(f'{QC_DIR}/label_map.html') / 1e6:.1f} MB), "
           f"{len(samples)} sample cells with pictures. Open it in Chrome / Safari.")
 
 
@@ -608,8 +613,14 @@ def main():
     summary();                                            tick("summary")
     if not args.no_qc:
         qc(tile_scores, aerial_labels, mine, labels);     tick("qc")
-    print("\nTime per step (minutes):", ", ".join(f"{k} {v:.1f}" for k, v in TIMES.items()), f"| total {(time.time() - T0) / 60:.1f}")
+    log_event("labeler_completed", "Data labeling completed", dataset_id=DS.split("/")[-1],
+              aerial_cells_scored=len(aerial_labels), street_cells_scored=len(labels),
+              elapsed_seconds=round(time.time() - T0, 2))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        log_event("labeler_failed", "Data labeling failed", severity="ERROR", error_type=type(error).__name__)
+        raise SystemExit(1) from None

@@ -1,12 +1,12 @@
 """Argument parsing and dispatch for the GreenPath knowledge service."""
 import argparse
-import json
 from pathlib import Path
 from rag.indexing import package_index, serve_chroma
 from rag.indexing import chunk, embed, load
 from rag.retrieval import query, retrieve
 from rag.generators import answer_from_results
 from rag.settings import CHUNK_TYPE, CHUNK_TYPES
+from rag.logging import log_event
 
 
 def chat(method, question, n_results=5):
@@ -21,9 +21,9 @@ def main(args=None):
         if args.archive is None or args.archive.exists():
             raise ValueError("Choose a new --archive path; existing archives are never overwritten")
         checksum, manifest = package_index(args.source, args.archive)
-        print(json.dumps({"sha256": checksum, "count": manifest["total_chunks"]}))
+        log_event("index_packaged", "Index packaged", sha256=checksum, chunk_count=manifest["total_chunks"])
         return
-    print("CLI Arguments:", args)
+    log_event("rag_cli_started", "RAG command started", chunk_type=args.chunk_type)
 
     if not any((args.chunk, args.embed, args.load, args.query, args.chat)):
         raise ValueError("Choose --chunk, --embed, --load, --query or --chat; see --help")
@@ -42,7 +42,8 @@ def main(args=None):
     if args.query:
         query(args.chunk_type, args.question, args.n_results)
     if args.chat:
-        print(chat(args.chunk_type, args.question, args.n_results))
+        chat(args.chunk_type, args.question, args.n_results)
+        log_event("rag_completed", "RAG chat completed")
 
 
 if __name__ == "__main__":
@@ -67,4 +68,8 @@ if __name__ == "__main__":
     if args.n_results < 1:
         parser.error("--n_results must be at least 1")
 
-    main(args)
+    try:
+        main(args)
+    except Exception as error:
+        log_event("rag_cli_failed", "RAG command failed", severity="ERROR", error_type=type(error).__name__)
+        raise SystemExit(1) from None

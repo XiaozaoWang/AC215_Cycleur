@@ -188,10 +188,33 @@ def test_stream_without_an_area_baseline_sends_all_colours_once_at_the_end(toy):
     assert len(batches) == 1 and len(batches[0]) == 8 and events[-1]["type"] == "result" and events[-1]["area_mean"] == {}
 
 
-def test_stream_reports_a_model_failure_as_an_event_and_input_errors_as_http_errors(toy, monkeypatch):
+def test_stream_reports_a_model_failure_as_an_event_and_input_errors_as_http_errors(toy, monkeypatch, capsys):
     monkeypatch.setattr(model_client, "predict", lambda tiles, on_batch=None: (_ for _ in ()).throw(model_client.ModelServiceError("down")))
     assert stream_events(BODY)[-1] == {"type": "error", "status": 502, "detail": "down"}
+    log = json.loads(capsys.readouterr().out)
+    assert log["event"] == "route_failed" and log["severity"] == "ERROR"
+    assert log["stream_status_code"] == 502 and log["error_type"] == "ModelServiceError"
     assert client.post("/route/stream", json={**BODY, "origin": {"lon": -70.0, "lat": 42.35}}).status_code == 422
+
+
+def test_stream_preserves_request_id_across_workers(toy, monkeypatch, capsys):
+    from api.logging import downstream_headers
+    predict, seen = model_client.predict, []
+
+    def capture(tiles, on_batch=None):
+        seen.append(downstream_headers())
+        return predict(tiles, on_batch)
+
+    monkeypatch.setattr(model_client, "predict", capture)
+    response = client.post("/route/stream", json=BODY, headers={"X-Request-ID": "stream-request"})
+    assert response.status_code == 200 and response.headers["X-Request-ID"] == "stream-request"
+    assert seen and all(headers == {"X-Request-ID": "stream-request"} for headers in seen)
+    output = capsys.readouterr().out
+    log = json.loads(output)  # Exactly one summary, after the streamed result.
+    assert log["event"] == "route_completed" and log["request_id"] == "stream-request"
+    result = json.loads(response.text.splitlines()[-1])
+    assert log["route_count"] == len(result["routes"]) and log["cell_count"] > 0
+    assert BODY["text"] not in output and "weights" not in output
 
 
 def test_candidates_show_the_length_match_tradeoff(toy):

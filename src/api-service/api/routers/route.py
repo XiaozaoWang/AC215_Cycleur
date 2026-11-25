@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 
 from api import model_client, road_graph, routing
 from api.routing import RoutePlan, RoutePlanRequest, RouteRequest, RouteResponse
+from api.logging import record_fields
 
 router = APIRouter(tags=["routing"])
 
@@ -24,8 +25,11 @@ _EXPECTED = (road_graph.UnknownGraphError, road_graph.NoRouteError, model_client
 @router.post("/route/plan", response_model=RoutePlan)
 def plan(request: RoutePlanRequest):
     """The shortest route and the cells that will be predicted. Instant; needs no text."""
+    record_fields(region=request.region_id)
     try:
-        return routing.plan(request)
+        result = routing.plan(request)
+        record_fields(cell_count=len(result.cells), route_count=1)
+        return result
     except _EXPECTED as exc:
         raise _http_error(exc) from exc
 
@@ -33,6 +37,7 @@ def plan(request: RoutePlanRequest):
 @router.post("/route/stream")
 def stream(request: RouteRequest):
     """Plan routes and report progress as newline-delimited JSON events (see routing.stream)."""
+    record_fields(region=request.region_id)
     try:
         graph, prep = routing.prepare(request)      # unknown region and unreachable points are plain HTTP errors
     except _EXPECTED as exc:
@@ -43,6 +48,7 @@ def stream(request: RouteRequest):
 
 @router.post("/route", response_model=RouteResponse)
 def plan_route(request: RouteRequest):
+    record_fields(region=request.region_id)
     try:
         return routing.plan_route(request)
     except _EXPECTED as exc:

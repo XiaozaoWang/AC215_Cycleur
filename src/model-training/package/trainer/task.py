@@ -4,7 +4,7 @@ Runs on a temporary Vertex AI training machine (workflow/model.py submits the jo
 
 1. dry run (default, CPU, 96 train + 48 val cells, 2 epochs, only checks the plumbing): python -m trainer.task --bucket <bucket> --training-id <id>
 2. real training (all train + val, up to 25 epochs, needs an NVIDIA GPU): python -m trainer.task --bucket <bucket> --training-id <id> --no-dry-run
-Reads gs://<bucket>/training/<training-id>/, writes gs://<bucket>/results/<training-id>/{dry|final}/<run_id>/ and latest.json (also logs to W&B if WANDB_API_KEY is set).
+Reads gs://<bucket>/training/<training-id>/, writes gs://<bucket>/results/<training-id>/{dry|final}/<run_id>/ and latest.json (also logs to W&B using WANDB_API_KEY or Secret Manager).
 """
 import argparse
 import datetime
@@ -41,6 +41,11 @@ DRY_CELLS = {"train": 96, "val": 48}       # how many cells per split in a dry r
 TILE_DIR = "/tmp/greenpath/tiles"          # aerial tiles get copied from the bucket to this temp folder on the training machine first
 RUNS_DIR = "/tmp/greenpath/runs"           # results are written on the machine first, then copied to the bucket at the end (the machine is destroyed after use)
 TOLERANCES = {0.05: "acc05", 0.10: "acc10", 0.20: "acc20"}   # tolerance accuracy: share of predictions within 0.05 / 0.10 / 0.20 of the ground truth
+
+
+def log_event(event, message, severity="INFO", **fields):
+    print(json.dumps({"severity": severity, "message": message, "service": "model-training",
+                      "event": event, "request_id": None, "trace_id": None, **fields}), flush=True)
 
 
 # Define the 4 command line args
@@ -103,7 +108,8 @@ def load_training_set(fs, bucket, training_id, dry_run):
 
     # split into two tables: train is for training, val is for scoring each epoch and picking the best one
     frames = {s: ds[ds.split == s].reset_index(drop=True) for s in ["train", "val"]}
-    print(f"{training_id}: {len(dims)} scores · " + " · ".join(f"{s} {len(f):,}" for s, f in frames.items()) + (" (dry run subset)" if dry_run else ""), flush=True)
+    log_event("training_data_loaded", "Training data loaded", training_id=training_id, target_count=len(dims),
+              train_cells=len(frames["train"]), val_cells=len(frames["val"]), dry_run=dry_run)
 
     # version number (generation): changes every time the file in the bucket is rewritten. Saved in config.json so later we can tell which version of the training table this model was trained on
     return dims, frames, fs.info(f"{root}/dataset.parquet")["generation"]
@@ -115,7 +121,7 @@ def download_tiles(fs, bucket, paths):
     os.makedirs(TILE_DIR, exist_ok=True)
     local = lambda rel: os.path.join(TILE_DIR, os.path.basename(rel))    # the file name is the cell's H3 id, so no name clashes
     todo = [rel for rel in sorted(set(paths)) if not os.path.exists(local(rel))]   # skip the ones already downloaded
-    print(f"{len(set(paths)):,} pictures needed, {len(todo):,} to download", flush=True)
+    log_event("tile_download_started", "Downloading training tiles", tile_count=len(set(paths)), download_count=len(todo))
 
     def fetch(rel):
         fs.get_file(f"gs://{bucket}/{rel}", local(rel) + ".part")
@@ -196,6 +202,7 @@ def masked_loss(pred, target):
 
 # Entry point: read args, then steps 1-6
 def main(argv=None):
+    started = time.perf_counter()
     a = parse_args(argv)
     fs = gcsfs.GCSFileSystem()                # tool to read/write the bucket; on Vertex the identity is the service account set in workflow/model.py
     out_prefix = f"gs://{a.bucket}/results/{a.training_id}/{'dry' if a.dry_run else 'final'}"   # where results go (dry run and real training are kept apart)
@@ -204,7 +211,7 @@ def main(argv=None):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_amp = device.type == "cuda"
     amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
-    print("Device:", device, flush=True)
+    log_event("training_started", "Training started", training_id=a.training_id, dry_run=a.dry_run, device=str(device))
 
     # Real training but no GPU: stop right away (one epoch on CPU takes hours, wasted money)
     if not use_amp and not a.dry_run:
@@ -235,7 +242,7 @@ def main(argv=None):
     rid = f"{N.BACKBONE}-linear-seed{SEED}-{hashlib.md5(json.dumps(settings, sort_keys=True).encode()).hexdigest()[:8]}" #name based on the recipe card, rid = "dinov2_s-linear-seed42-" + first 8 chars of the recipe card's "fingerprint"
     rdir = os.path.join(RUNS_DIR, rid) 
     os.makedirs(rdir, exist_ok=True) #make a folder on the training machine, the 5 files like best_model.pt get written here first during training.
-    print(f"run: {rid}", flush=True)
+    log_event("training_run_created", "Training run created", training_id=a.training_id, model_run_id=rid)
 
     # Step 3: build model and optimizer
     # First fix all random seeds (Python, numpy, PyTorch), so the linear layer's starting values and the augmentation are the same every time
@@ -251,15 +258,30 @@ def main(argv=None):
     tl, vl = loader("train"), loader("val")
     names = N.trainable_names(model)          # names of the trained params, only these get saved into best_model.pt
 
-    # W&B: log the training curves only if there is a key (viewable on the web), otherwise train as usual
+    # W&B: prefer a local key; on Vertex, fetch it using the training service account's default credentials.
     wb, key = None, os.environ.get("WANDB_API_KEY")
-    if key:
-        import wandb
-        wandb.login(key=key)
-        group = "dry" if a.dry_run else "final"
-        wb = wandb.init(project="greenpath", group=group, name=rid, tags=[group, a.training_id], config=settings)
-    else:
-        print("no WANDB_API_KEY: this run is NOT logged to Weights & Biases")
+    try:
+        if not key:
+            from google.cloud import secretmanager
+
+            project = os.environ.get("GOOGLE_CLOUD_PROJECT", "organic-victory-508017-v9")
+            secret_id = os.environ.get("WANDB_SECRET_ID", "wandb-api-key")
+            with secretmanager.SecretManagerServiceClient() as client:
+                response = client.access_secret_version(
+                    request={"name": f"projects/{project}/secrets/{secret_id}/versions/1"},
+                    timeout=30,
+                )
+                key = response.payload.data.decode("UTF-8").strip()
+        if key:
+            import wandb
+            if wandb.login(key=key):
+                group = "dry" if a.dry_run else "final"
+                wb = wandb.init(project="greenpath", group=group, name=rid, tags=[group, a.training_id], config=settings)
+    except Exception:
+        # Exception details from authentication libraries may contain credentials; never log them.
+        wb = None
+    if wb is None:
+        log_event("wandb_unavailable", "W&B authentication could not be initialized; continuing without W&B logging. Check the local key or training service account's Secret Manager access.", severity="WARNING", training_id=a.training_id)
 
     # Step 4: training loop. One epoch = one pass over all training images in batches: predict, compute loss, compute gradients, update params
     # After each epoch take one exam on val: if MAE beats the best so far, save this epoch's weights as best_model.pt; stop early after patience epochs in a row with no progress
@@ -282,7 +304,6 @@ def main(argv=None):
         row = dict(epoch=ep, train_loss=loss_sum / max(steps, 1), **summary(metric_table(predict(model, vl, device, use_amp, amp_dtype), frames["val"], dims)),
                    seconds=time.time() - t0)
         hist.append(row)
-        print(f"epoch {ep}: train loss {row['train_loss']:.4f} · val MAE {row['val_mae']:.4f} · acc ±0.10 {row['val_acc10']:.3f} · {row['seconds']:.0f} s", flush=True)
         if wb is not None:
             wb.log(row)
 
@@ -293,7 +314,8 @@ def main(argv=None):
         else:
             bad += 1
             if bad >= a.patience:
-                print("early stopping", flush=True); break
+                log_event("training_early_stopped", "Training stopped early", training_id=a.training_id, model_run_id=rid)
+                break
 
     # Step 5: load back the weights of the best epoch (not the last one), recompute the val predictions and metrics
     ck = N.load_weights(model, ckpt)
@@ -313,7 +335,6 @@ def main(argv=None):
     T.to_parquet(os.path.join(rdir, "metrics.parquet"), index=False)
     pd.DataFrame(P, columns=dims).assign(cell_id=frames["val"].cell_id.values).to_parquet(os.path.join(rdir, "predictions.parquet"), index=False)
     json.dump(cfg, open(os.path.join(rdir, "config.json"), "w"), indent=2, default=str)
-    print(f"{rid} done in {cfg['train_seconds'] / 60:.1f} minutes · best epoch {cfg['best_epoch']} · val MAE {S['val_mae']:.4f} · acc ±0.10 {S['val_acc10']:.3f}", flush=True)
     if wb is not None:
         wb.summary.update(S | {"best_epoch": cfg["best_epoch"]})
         wb.finish()
@@ -325,9 +346,14 @@ def main(argv=None):
     # latest.json: records which run is the latest, deployment reads it to know which best_model.pt to use
     with fs.open(f"{out_prefix}/latest.json", "w") as f:
         json.dump({"run_id": rid, "training_id": a.training_id, "dry_run": a.dry_run, "updated_at": cfg["created_at"]}, f, indent=2)
-    print(f"saved to {out_prefix}/{rid}/ and updated latest.json", flush=True)
+    log_event("training_completed", "Training completed and results saved", training_id=a.training_id,
+              model_run_id=rid, best_epoch=cfg["best_epoch"], elapsed_seconds=round(time.perf_counter() - started, 2))
     return rid
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as error:
+        log_event("training_failed", "Training failed", severity="ERROR", error_type=type(error).__name__)
+        raise SystemExit(1) from None

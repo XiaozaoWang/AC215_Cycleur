@@ -52,7 +52,9 @@ def load_index():
 
 
 INDEX = load_index()
-print(f"model {RUN_ID} ready on {DEVICE} · {len(TARGETS)} scores · {len(INDEX):,} cells from {DATASETS}", flush=True)
+print(json.dumps({"severity": "INFO", "message": "Model ready", "service": "model-service", "event": "model_ready",
+                  "request_id": None, "trace_id": None, "model_run_id": RUN_ID, "training_id": TRAINING_ID,
+                  "target_count": len(TARGETS), "cell_count": len(INDEX), "device": DEVICE}), flush=True)
 
 
 # A batch of images (raw bytes of PNG files), one set of scores per image {score name: 0-1}

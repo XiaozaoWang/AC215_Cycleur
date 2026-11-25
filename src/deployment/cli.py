@@ -14,6 +14,7 @@ import argparse
 import io
 import json
 import os
+from pathlib import Path
 import shutil
 import sys
 import time
@@ -43,6 +44,7 @@ ARTIFACTS = "../model-service/artifacts"                       # --prepare puts 
 NETWORK_PY = "../model-training/package/trainer/network.py"    # same model code as training, so preprocessing matches
 N_TEST = 50          # --test --service model checks this many validation cells
 TOLERANCE = 0.01     # training ran in float16 on a GPU, the service runs float32 on CPU, so scores differ a tiny bit
+BASELINE_MANIFEST = Path(__file__).resolve().parents[1] / "api-service" / "data" / "baselines" / "manifest.json"
 
 # Everything that differs between the three services
 #   invoker: who may call it, "allUsers" means public, otherwise the service account of the caller
@@ -173,6 +175,8 @@ def set_access(client, name, invoker):
 # tag None = the service's own tag in SERVICES (gpu for the model, latest for the rest)
 # model_concurrency None = as many calls as model-service takes at once (instances x requests per instance)
 def deploy(service, tag=None, model_concurrency=None):
+    if service == "api":
+        check_baseline_model()
     client = run_v2.ServicesClient()
     name = full_name(service)
     model_concurrency = model_concurrency or SERVICES["model"]["max_instances"] * SERVICES["model"]["concurrency"]
@@ -187,6 +191,8 @@ def deploy(service, tag=None, model_concurrency=None):
         print(f"creating {SERVICES[service]['name']} ...")
     result = operation.result()
     set_access(client, name, SERVICES[service]["invoker"])
+    if service == "model":
+        check_baseline_model()
     print("deployed:", result.uri)
     print(f"next: python cli.py --test --service {service}")
 
@@ -206,12 +212,35 @@ def service_url(service, local):
     return url, ({} if service == "frontend" else {"Authorization": f"Bearer {id_token(url)}"})
 
 
+def check_baseline_model(health=None, local=False):
+    """Deployment validation only; route requests never perform this comparison."""
+    try:
+        manifest = json.loads(BASELINE_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"Cannot read routing baseline manifest: {BASELINE_MANIFEST}") from error
+    if not isinstance(manifest, dict) or any(not isinstance(manifest.get(key), str) or not manifest[key].strip()
+                                            for key in ("model_run_id", "training_id")):
+        raise RuntimeError("Routing baseline manifest requires non-empty model_run_id and training_id strings")
+    if health is None:
+        url, headers = service_url("model", local)
+        response = requests.get(f"{url}/health", headers=headers, timeout=300)
+        response.raise_for_status()
+        health = response.json()
+    expected = {"run_id": manifest["model_run_id"], "training_id": manifest["training_id"]}
+    if not isinstance(health, dict) or any(health.get(key) != value for key, value in expected.items()):
+        actual = {key: health.get(key) for key in expected} if isinstance(health, dict) else {}
+        raise RuntimeError(f"Routing baseline/model version mismatch: expected {expected}; Model Service /health returned {actual}. "
+                           "Deployment is not valid; use a matching model and baseline before proceeding.")
+    print(f"PASS: routing baselines match model {expected['run_id']} (training set {expected['training_id']})", flush=True)
+
+
 # --test --service model: feature parity check. The service has to give the same scores as training did for 50 validation cells
 def test_model(fs, local):
     url, headers = service_url("model", local)
     health = requests.get(f"{url}/health", headers=headers, timeout=300)
     health.raise_for_status()
     h = health.json()
+    check_baseline_model(h)
     print(f"model {h['run_id']} (training set {h['training_id']}) on {h.get('device', 'cpu')} · {h['cells']:,} cells can be scored")
 
     expected = pd.read_parquet(io.BytesIO(fs.cat(f"{BUCKET}/results/{h['training_id']}/final/{h['run_id']}/predictions.parquet")))
@@ -233,6 +262,7 @@ def test_model(fs, local):
 
 # --test --service api|frontend: the API must stay private, Boston cells load; --full also scores Boston for real (Gemini + model)
 def test_app(service, local=False, full=False):
+    check_baseline_model(local=local)
     url, headers = service_url(service, local)
     if service == "api" and not local:
         assert requests.get(url, timeout=60).status_code in (401, 403), "API must remain private"
