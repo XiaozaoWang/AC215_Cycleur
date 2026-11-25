@@ -4,36 +4,47 @@ What is still to do, then what changed in this milestone. The full previous READ
 (`git show a98148d:README.md`).
 
 ## Still to do
+**Owners:** ![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square) ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square) ![Hailang](https://img.shields.io/badge/Hailang-e07a1f?style=flat-square) ![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)
+
+**Storage**
+- [ ] User accounts, and storage for each user's history ![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)
+
+- [ ] Shared data storage for the satellite tiles and the road networks (now packed into the image), plus a tool that
+      downloads the road network and tiles for a new area automatically and keeps the files organized (like data-collector) ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
 
 **Routing and the agent**
 
 - [ ] Use speed limits, street lights, turn restrictions and traffic signals: some of it in routing itself, all of it
-      recorded for the agent
-- [ ] Agent architecture: its own service, or part of api-service; decide which routing information is useful to send to the LLM
-- [ ] Manage conversation history, routes and the satellite-tile bucket
-- [ ] A place-name (geocoding) API, so the start and the destination can be typed
-- [ ] Revisit how the routing search area is divided: should it be smaller? Could we sample every other cell to be
-      faster and plan longer routes?
-- [ ] Read through, clean up and consolidate the code
-- [ ] Sunset and weather APIs
-- [ ] Fine-tune a new "Expert" language style
+      recorded for the agent ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)
+- [ ] Agent architecture: its own service, or part of api-service; decide which routing information is useful to send to the LLM ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)
+- [ ] A place-name (geocoding) API, so the start and the destination can be typed ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)
+- [ ] Revisit how the routing search area is divided: should it be smaller? Could we sample every other cell to be 
+      faster and plan longer routes?![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
+- [ ] Read through, clean up and consolidate the code ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
+- [ ] Sunset and weather APIs ![Xiaozao](https://img.shields.io/badge/Xiaozao-1f8a66?style=flat-square)
+- [ ] Fine-tune a new "Expert" language style ![Hailang](https://img.shields.io/badge/Hailang-e07a1f?style=flat-square)
 
 **Frontend**
 
-- [ ] How the two inputs (the agent and route planning) work together
-- [ ] Sign-in and account management
+- [ ] How the two inputs (the agent and route planning) work together ![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
+- [ ] Sign-in and account management ![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)
+
+
 
 **Backend and deployment**
 
-- [ ] Automated CI/CD
-- [ ] Monitoring for the model and the other services
-- [ ] W&B logging for model training
+- [ ] Automated CI/CD ![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
+- [ ] Monitoring for the model and the other services ![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)
+- [ ] W&B logging for model training ![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)
+- [ ] Final deployment and integration for milestone 4 ![Hongyu](https://img.shields.io/badge/Hongyu-2c64a6?style=flat-square)
+
 
 **Evaluation**
 
-- [ ] Model Evaluation: Comparing our model with Gemini 2.5 flash to discuss the necessity of the model training with street view.
+- [ ] Model Evaluation: Comparing our model with Gemini 2.5 flash to discuss the necessity of the model training with street view. ![Hailang](https://img.shields.io/badge/Hailang-e07a1f?style=flat-square)![Liufei](https://img.shields.io/badge/Liufei-c2457f?style=flat-square)
 
-**Later, smaller ideas**
+
+**Later (12.1-12.14), smaller ideas**
 
 - [ ] Click a point on a route to see Street View
 - [ ] Sign in with Google (in progress)
@@ -44,7 +55,7 @@ What is still to do, then what changed in this milestone. The full previous READ
 - [ ] Open a planned route in Google Maps navigation
 - [ ] Voice input and a voice assistant (Wang's suggestion)
 
-## What changed in this milestone
+## What we've finished in this milestone
 
 1. [RAG service](#1-rag-service) was reorganized
 2. [Kubernetes on GKE](#2-kubernetes-on-gke) is a new way to deploy the whole app
