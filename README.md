@@ -29,6 +29,10 @@ What is still to do, then what changed in this milestone. The full previous READ
 - [ ] Monitoring for the model and the other services
 - [ ] W&B logging for model training
 
+**Evaluation**
+
+- [ ] Model Evaluation: Comparing our model with Gemini 2.5 flash to discuss the necessity of the model training with street view.
+
 **Later, smaller ideas**
 
 - [ ] Click a point on a route to see Street View
